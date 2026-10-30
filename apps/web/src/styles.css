@@ -1,0 +1,53 @@
+/* Colors follow apps/ios/App/Design.swift (cream, ink, secondary, orange, peach). */
+:root {
+  --cream: #fff9ee;
+  --ink: #362a22;
+  --secondary: #735a4a;
+  --orange: #ff8a4d;
+  --peach: #ffe3cf;
+  --lilac: #eee6fa;
+  color: var(--ink);
+  background: var(--cream);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100dvh; }
+button { font: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: 0.5; }
+h1 { font-size: 1.4rem; margin: 0; }
+.screen {
+  display: flex; flex-direction: column; align-items: center; gap: 1.2rem;
+  max-width: 34rem; margin: 0 auto; min-height: 100dvh;
+  padding: calc(env(safe-area-inset-top) + 1.5rem) 1.25rem calc(env(safe-area-inset-bottom) + 1.5rem);
+}
+.center { justify-content: center; }
+header { text-align: center; }
+.muted { color: var(--secondary); margin: 0.2rem 0 0; }
+.small { font-size: 0.8rem; margin: 0.15rem 0; overflow-wrap: anywhere; }
+.error { color: #b3261e; text-align: center; margin: 0; }
+.signin { display: flex; flex-direction: column; gap: 0.6rem; width: 100%; max-width: 20rem; }
+.signin input { font-size: 1rem; padding: 0.7rem 0.8rem; border-radius: 0.8rem; border: 1px solid var(--peach); background: white; }
+.primary, .secondary, .chip, .update { border: none; border-radius: 999px; padding: 0.65rem 1.2rem; }
+.primary { background: var(--orange); color: white; font-weight: 600; }
+.secondary { background: var(--peach); color: var(--ink); }
+.update { background: var(--ink); color: var(--cream); width: 100%; }
+.languages { display: flex; gap: 0.5rem; }
+.chip { background: white; color: var(--ink); border: 1px solid var(--peach); }
+.chip.selected { background: var(--ink); color: var(--cream); }
+.orb {
+  width: 11rem; height: 11rem; border-radius: 50%; border: none; margin: 1rem 0;
+  background: radial-gradient(circle at 35% 30%, #fff1c7, var(--peach) 35%, var(--orange) 75%, #cdaeee);
+  box-shadow: 0 1rem 2.5rem rgba(255, 138, 77, 0.35);
+  color: var(--ink); font-size: 1.15rem; font-weight: 600;
+  transition: transform 80ms linear;
+}
+.orb.connecting, .orb.closing { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.65; } }
+.controls { display: flex; align-items: center; gap: 1rem; }
+.transcript { width: 100%; display: flex; flex-direction: column; gap: 0.5rem; }
+.transcript p { margin: 0; padding: 0.6rem 0.8rem; border-radius: 1rem; line-height: 1.4; max-width: 90%; }
+.transcript .assistant { background: white; align-self: flex-start; }
+.transcript .user { background: var(--lilac); align-self: flex-end; }
+.diagnostics { width: 100%; margin-top: auto; color: var(--secondary); }
+.diagnostics summary { font-size: 0.85rem; }

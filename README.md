@@ -128,6 +128,7 @@ The Android release branch is being prepared separately. See [release progress](
 | Directory | Contents |
 | --- | --- |
 | `apps/android/` | Native Kotlin/Compose Android client and tests |
+| `apps/web/` | Personal web/PWA voice prototype and its gateway; see its README |
 | `apps/ios/App/` | SwiftUI views, SwiftData storage, Keychain, WebRTC transport and API coordination |
 | `apps/ios/Core/` | Language modules, teaching policy, transcripts, vocabulary evidence and recall projection |
 | `apps/ios/Tests/` | Core learning and translation tests |
