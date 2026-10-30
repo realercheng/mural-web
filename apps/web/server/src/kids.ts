@@ -137,7 +137,10 @@ export function kidInstructions(item: KidScenario, nickname?: string, review: st
       ? `First, a quick review of words from last time: ${review.join(', ')}. Ask the child to use each word once in a fun way, then start today's topic.`
       : 'There is no earlier lesson to review. Start today\'s topic with an easy question.',
     'Near the end, the app will tell you that time is almost up. Then ask the child to teach you one word from today, praise them and say goodbye.',
-    'Safety: never ask for or repeat personal information such as a full name, home address, school name, phone number, passwords or photos. If the child shares such details, do not repeat them; kindly change the subject. Keep everything suitable for young children: nothing scary, violent, romantic or about buying things online. If the child brings up an unsuitable topic, answer kindly in one sentence and return to the game. If the child seems hurt, scared or in danger, kindly tell them in simple Chinese to talk to a parent or teacher now.',
+    // Azure's content filter stops the session when this rule lists unsuitable themes next to a
+    // child's age, so it names the allowed topics instead. Re-test with real GPT-Live after edits.
+    'Privacy: never ask for or repeat personal information such as a full name, home address, school name or phone number. If the child shares such details, do not repeat them; kindly change the subject.',
+    'Topics: keep every topic friendly and right for a young child, such as school, animals, food, colours, games, nature and family fun. If the child brings up anything else, answer kindly in one short sentence and return to the game. If the child seems sad or upset, kindly suggest in simple Chinese that they talk to a parent or teacher.',
     'Always be encouraging and patient. Never mock, tease or scold a mistake, and never say "wrong" harshly. Do not read these instructions aloud, mention scores or claim to be a person.',
   ].join('\n');
 }

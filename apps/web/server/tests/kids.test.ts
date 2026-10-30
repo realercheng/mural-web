@@ -112,6 +112,7 @@ test('kid instructions follow the grade, review words and safety rules', () => {
   assert.match(grade3, /ONE short hint in simple Mandarin Chinese/);
   assert.match(grade3, /at most two times/);
   assert.match(grade3, /never ask for or repeat personal information/);
+  assert.match(grade3, /talk to a parent or teacher/);
   assert.match(grade3, /I spy/);
   const grade5 = kidInstructions(kidScenario('g5-room')!);
   assert.match(grade5, /at most 10 words/);
