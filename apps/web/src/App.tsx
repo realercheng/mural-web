@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { AudioEngine, SpeechGate } from './audio';
-import { encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT } from '../server/src/wire';
+import { encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT, readOutputFrame } from '../server/src/wire';
 
 interface Usage { todaySeconds: number; totalSeconds: number; remainingSeconds: number; nextSessionSeconds: number }
 interface Language { id: string; name: string; nativeName: string }
@@ -122,7 +122,10 @@ export function App() {
     ws.onmessage = event => {
       if (event.data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(event.data);
-        if (bytes[0] === FRAME_AUDIO) { audio.play(bytes.subarray(1)); maxBacklog = Math.max(maxBacklog, audio.backlog); }
+        if (bytes[0] === FRAME_AUDIO && bytes.length > 5) {
+          const { offsetSamples, payload } = readOutputFrame(bytes);
+          audio.play(payload, offsetSamples); maxBacklog = Math.max(maxBacklog, audio.backlog);
+        }
         return;
       }
       const data = JSON.parse(event.data as string);
@@ -145,7 +148,7 @@ export function App() {
           break;
         case 'mural.ended':
           note(`对话结束：${REASONS[data.reason] ?? data.reason}，计时 ${minutes(data.seconds)}${data.confirmed ? '' : '（按连接时长估算）'}`);
-          note(`网络：下行 ${data.traffic?.toClientKB ?? '?'} KB，上行 ${data.traffic?.fromClientKB ?? '?'} KB，服务器待发积压最多 ${data.traffic?.maxBufferedKB ?? '?'} KB，本机播放积压最多 ${maxBacklog.toFixed(1)} 秒`);
+          note(`网络：下行 ${data.traffic?.toClientKB ?? '?'} KB，上行 ${data.traffic?.fromClientKB ?? '?'} KB，服务器待发积压最多 ${data.traffic?.maxBufferedKB ?? '?'} KB，本机播放积压最多 ${maxBacklog.toFixed(1)} 秒，断流 ${audio.underruns} 次，缓冲 ${audio.jitterBuffer.toFixed(2)} 秒`);
           if (data.reason !== 'ended_by_learner') setMessage(`对话已结束：${REASONS[data.reason] ?? data.reason}`);
           break;
       }

@@ -1,6 +1,8 @@
 // Browser <-> gateway audio framing, shared by both sides. GPT-Live itself still receives
 // base64 PCM16; only the long, often lossy browser link uses this compact form.
-// Binary frame: one type byte, then G.711 mu-law samples at 24 kHz mono.
+// Binary frame: one type byte, then G.711 mu-law samples at 24 kHz mono. Speech sent to the
+// browser also carries its position on the provider timeline, so playback keeps natural pauses
+// and absorbs network jitter: [type][uint32 LE offset in samples][mu-law].
 export const FRAME_AUDIO = 1;
 export const FRAME_HEARTBEAT = 2;
 
@@ -38,6 +40,18 @@ export function frame(type: number, payload?: Uint8Array): Uint8Array<ArrayBuffe
   out[0] = type;
   if (payload) out.set(payload, 1);
   return out;
+}
+
+export function outputFrame(offsetSamples: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(5 + payload.length);
+  out[0] = FRAME_AUDIO;
+  new DataView(out.buffer).setUint32(1, offsetSamples >>> 0, true);
+  out.set(payload, 5);
+  return out;
+}
+
+export function readOutputFrame(bytes: Uint8Array): { offsetSamples: number; payload: Uint8Array } {
+  return { offsetSamples: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(1, true), payload: bytes.subarray(5) };
 }
 
 /** True when a PCM16 chunk carries no audible signal; GPT-Live streams digital silence between turns. */

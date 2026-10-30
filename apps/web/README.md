@@ -9,7 +9,7 @@ Browser (PWA) ──cookie + mu-law speech over WebSocket──> gateway (server
 ```
 
 - The browser captures the microphone, converts it to 24 kHz mono PCM16 (`public/pcm-capture.js`) and plays returned speech.
-- The browser link carries binary frames defined in `server/src/wire.ts`: G.711 mu-law audio at 24 kHz, plus a one-byte heartbeat. The browser sends only speech (a level gate with pre-roll and hangover); the gateway feeds GPT-Live 100 ms of silence whenever no speech arrived for 300 ms, because the provider expires sessions without continuous input. GPT-Live streams digital silence between turns; the gateway drops it. Compared with base64 PCM16 in JSON both ways, this reduces traffic on the learner's network by roughly 5–10 times, which matters on long international paths.
+- The browser link carries binary frames defined in `server/src/wire.ts`: G.711 mu-law audio at 24 kHz, plus a one-byte heartbeat. The browser sends only speech (a level gate with pre-roll and hangover); the gateway feeds GPT-Live 100 ms of silence whenever no speech arrived for 300 ms, because the provider expires sessions without continuous input. GPT-Live streams digital silence between turns; the gateway drops it and labels each speech frame with its position on the provider timeline. The browser plays speech on that timeline behind a jitter buffer (0.25 s, growing by 0.1 s up to 0.8 s after each late frame), so network stalls do not chop words together. Compared with base64 PCM16 in JSON both ways, this reduces traffic on the learner's network by roughly 5–10 times, which matters on long international paths.
 - The gateway signs in one user with an access code and an HttpOnly cookie. It alone holds the provider key, sends `session.start` with fixed model, voice and instructions, and forwards only `session.input_audio.append` and `session.close` from the browser.
 - Instructions port `TeachingPolicy.voice` and `TeachingPolicy.greeting` for a free conversation. `server/src/languages.ts` is generated from the English and Spanish Swift modules.
 - Client delegations receive the module's fixed "couldn't check that" reply; there is no lookup backend yet.
@@ -35,7 +35,7 @@ Microphone access needs HTTPS, or `localhost` on the same machine. `npm run dev`
 
 ## Deploy
 
-`Dockerfile` builds the interface and gateway, runs the tests and produces a non-root image that listens on port 8080 and stores usage in `/data`. Put it behind a TLS reverse proxy that forwards WebSocket upgrades and sets `X-Real-IP`, then set `TRUST_PROXY=true`.
+`Dockerfile` builds the interface and gateway, runs the tests and produces a non-root image that listens on port 8080 and stores usage in `/data`. Put it behind a TLS reverse proxy that forwards WebSocket upgrades and sets `X-Real-IP`, then set `TRUST_PROXY=true`. `PUBLIC_ORIGIN` accepts a comma-separated list, so a regional front proxy near the learner (for example `https://mural-hk.example.com`) can serve the same gateway; requests from any other origin are rejected.
 
 ## Limits of this prototype
 

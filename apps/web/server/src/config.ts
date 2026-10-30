@@ -2,7 +2,8 @@ import { resolve } from 'node:path';
 
 export interface Config {
   port: number;
-  publicOrigin: string;
+  /** Every origin that serves this app, e.g. the direct host and a regional front proxy. */
+  publicOrigins: string[];
   upstreamURL: string;
   upstreamKey: string;
   model: string;
@@ -36,7 +37,7 @@ function seconds(env: NodeJS.ProcessEnv, name: string, fallback: number, max: nu
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const publicOrigin = new URL(text(env, 'PUBLIC_ORIGIN')).origin;
+  const publicOrigins = text(env, 'PUBLIC_ORIGIN').split(',').map(value => new URL(value.trim()).origin);
   const upstream = new URL(text(env, 'LIVE_UPSTREAM_URL'));
   if (upstream.protocol !== 'wss:' && !(upstream.protocol === 'ws:' && upstream.hostname === '127.0.0.1'))
     throw new Error('LIVE_UPSTREAM_URL must use wss:// (ws:// is allowed only for 127.0.0.1 tests).');
@@ -46,7 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (sessionSecret.length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters.');
   return {
     port: seconds(env, 'PORT', 8080, 65_535),
-    publicOrigin,
+    publicOrigins,
     upstreamURL: upstream.toString(),
     upstreamKey: text(env, 'LIVE_UPSTREAM_KEY'),
     model: text(env, 'LIVE_MODEL', 'gpt-live-1'),

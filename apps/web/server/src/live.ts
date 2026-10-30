@@ -4,7 +4,7 @@ import type { Config } from './config.js';
 import type { LanguageContent } from './languages.js';
 import { greeting, voiceInstructions } from './policy.js';
 import type { UsageStore } from './usage.js';
-import { decodeMulaw, encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT, isSilent } from './wire.js';
+import { decodeMulaw, encodeMulaw, FRAME_AUDIO, FRAME_HEARTBEAT, isSilent, outputFrame } from './wire.js';
 
 type Log = (event: string, fields?: Record<string, unknown>) => void;
 type State = 'connecting' | 'active' | 'closing' | 'ended';
@@ -30,6 +30,7 @@ export class LiveRelay {
   private startedAt?: number;
   private lastAliveAt = Date.now();
   private lastForwardedAt = 0;
+  private outputSamples = 0;
   private readonly traffic = { toClientKB: 0, fromClientKB: 0, maxBufferedKB: 0, droppedSilence: 0 };
   private providerSeconds?: number;
   private finalSeconds?: number;
@@ -106,8 +107,10 @@ export class LiveRelay {
         if (typeof audio !== 'string') return;
         const bytes = Buffer.from(audio, 'base64');
         const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1);
+        const offset = this.outputSamples;
+        this.outputSamples += pcm.length;
         if (isSilent(pcm)) { this.traffic.droppedSilence++; return; }
-        this.sendClientBinary(frame(FRAME_AUDIO, encodeMulaw(pcm)));
+        this.sendClientBinary(outputFrame(offset, encodeMulaw(pcm)));
         return;
       }
       case 'error':

@@ -24,16 +24,16 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
   const limits = { maxSessionSeconds: config.maxSessionSeconds, dailyLimitSeconds: config.dailyLimitSeconds,
                    totalLimitSeconds: config.totalLimitSeconds };
   let active: LiveRelay | undefined;
-  const secure = config.publicOrigin.startsWith('https:');
-  const wsOrigin = config.publicOrigin.replace(/^http/, 'ws');
-  const csp = `default-src 'self'; connect-src 'self' ${wsOrigin}; img-src 'self' data:; style-src 'self'; script-src 'self'; ` +
+  const secure = config.publicOrigins.every(origin => origin.startsWith('https:'));
+  const wsOrigins = config.publicOrigins.map(origin => origin.replace(/^http/, 'ws')).join(' ');
+  const csp = `default-src 'self'; connect-src 'self' ${wsOrigins}; img-src 'self' data:; style-src 'self'; script-src 'self'; ` +
               "worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
   const address = (request: IncomingMessage) => {
     const forwarded = request.headers['x-real-ip'];
     return config.trustProxy && typeof forwarded === 'string' ? forwarded : request.socket.remoteAddress ?? 'unknown';
   };
-  const sameOrigin = (request: IncomingMessage) => request.headers.origin === config.publicOrigin;
+  const sameOrigin = (request: IncomingMessage) => config.publicOrigins.includes(request.headers.origin ?? '');
   const send = (response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
     response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers });
     response.end(JSON.stringify(body));

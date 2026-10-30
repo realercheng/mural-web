@@ -7,7 +7,7 @@ import { after, before, test } from 'node:test';
 import WebSocket, { WebSocketServer } from 'ws';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { decodeMulaw, encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT } from '../src/wire.js';
+import { decodeMulaw, encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT, readOutputFrame } from '../src/wire.js';
 
 // A local fake GPT-Live endpoint. No provider is contacted and nothing is billed.
 const received: Record<string, unknown>[] = [];
@@ -46,7 +46,7 @@ const logs: { event: string; fields?: Record<string, unknown> }[] = [];
 before(async () => {
   await new Promise(resolve => fake.once('listening', resolve));
   const config = loadConfig({
-    PUBLIC_ORIGIN: origin, LIVE_UPSTREAM_URL: `ws://127.0.0.1:${(fake.address() as AddressInfo).port}/v1/live/sessions`,
+    PUBLIC_ORIGIN: `${origin}, https://front.example`, LIVE_UPSTREAM_URL: `ws://127.0.0.1:${(fake.address() as AddressInfo).port}/v1/live/sessions`,
     LIVE_UPSTREAM_KEY: 'sk-test-upstream', ACCESS_CODE: 'correct horse battery', SESSION_SECRET: 'x'.repeat(40),
     DATA_DIR: dataDir, STATIC_DIR: dataDir, IDLE_AUDIO_SECONDS: '600', CLOSE_GRACE_SECONDS: '1', TOTAL_LIMIT_SECONDS: '100',
   });
@@ -74,6 +74,8 @@ const nextEvent = (socket: WebSocket, type: string) => new Promise<Record<string
 
 test('sign-in requires the access code and the app origin', async () => {
   assert.equal((await signIn('wrong code value')).status, 401);
+  const viaFront = await fetch(`http://${base}/api/login`, { method: 'POST', headers: { Origin: 'https://front.example' }, body: JSON.stringify({ code: 'correct horse battery' }) });
+  assert.equal(viaFront.status, 200);
   const crossSite = await fetch(`http://${base}/api/login`, { method: 'POST', headers: { Origin: 'https://evil.example' }, body: '{}' });
   assert.equal(crossSite.status, 403);
   assert.equal((await fetch(`http://${base}/api/status`)).status, 401);
@@ -119,7 +121,9 @@ test('the server owns setup, filters browser events and records provider usage',
   // Silence from the provider is dropped; speech arrives once as compact mu-law.
   assert.equal(audioFrames.length, 1);
   assert.equal(audioFrames[0]![0], FRAME_AUDIO);
-  assert.deepEqual(decodeMulaw(audioFrames[0]!.subarray(1)), decodeMulaw(encodeMulaw(speech)));
+  const output = readOutputFrame(audioFrames[0]!);
+  assert.equal(output.offsetSamples, 2_400, 'speech keeps its place after the dropped 100 ms of silence');
+  assert.deepEqual(decodeMulaw(output.payload), decodeMulaw(encodeMulaw(speech)));
   const types = spoken(received).map(event => event.type);
   assert.deepEqual(types, ['session.start', 'session.instructions.append', 'session.commentary.append',
                            'session.input_audio.append', 'session.close']);
