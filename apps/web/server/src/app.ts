@@ -5,7 +5,9 @@ import { WebSocketServer } from 'ws';
 import { Auth, COOKIE_NAME } from './auth.js';
 import type { Config } from './config.js';
 import { LiveRelay } from './live.js';
-import { language, publicLanguages } from './policy.js';
+import { kidScenario, publicKidScenarios } from './kids.js';
+import { livePlan, publicLanguages } from './policy.js';
+import { PendingReports, writeReport } from './report.js';
 import { UsageStore } from './usage.js';
 
 const TYPES: Record<string, string> = {
@@ -22,8 +24,10 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
   const auth = new Auth(config.accessCode, config.sessionSecret, config.sessionHours);
   const usage = new UsageStore(config.dataDir, config.timeZone);
   const limits = { maxSessionSeconds: config.maxSessionSeconds, dailyLimitSeconds: config.dailyLimitSeconds,
-                   totalLimitSeconds: config.totalLimitSeconds };
+                   monthlyLimitSeconds: config.monthlyLimitSeconds, totalLimitSeconds: config.totalLimitSeconds };
   let active: LiveRelay | undefined;
+  const pending = new PendingReports();
+  const reporting = new Set<string>();
   const secure = config.publicOrigins.every(origin => origin.startsWith('https:'));
   const wsOrigins = config.publicOrigins.map(origin => origin.replace(/^http/, 'ws')).join(' ');
   const csp = `default-src 'self'; connect-src 'self' ${wsOrigins}; img-src 'self' data:; style-src 'self'; script-src 'self'; ` +
@@ -99,7 +103,33 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
       }
       if (path === '/api/status' && request.method === 'GET') {
         if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
-        send(response, 200, { usage: usage.summary(limits), active: Boolean(active), languages: publicLanguages() });
+        send(response, 200, { usage: usage.summary(limits), active: Boolean(active), languages: publicLanguages(),
+                              kids: { scenarios: publicKidScenarios(), reports: Boolean(config.text) } });
+        return;
+      }
+      if (path === '/api/kid/report' && request.method === 'POST') {
+        if (!sameOrigin(request)) { fail(response, 403, 'origin_rejected'); return; }
+        if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
+        if (!config.text) { fail(response, 503, 'report_unavailable'); return; }
+        const body = await readJSON(request) as { sessionID?: unknown };
+        const id = typeof body?.sessionID === 'string' ? body.sessionID : '';
+        const entry = pending.get(id);
+        if (!entry) { fail(response, 404, 'report_not_found'); return; }
+        if (!entry.lines.some(line => line.speaker === 'child' && line.text.trim())) {
+          pending.delete(id); fail(response, 422, 'nothing_to_report'); return;
+        }
+        if (reporting.has(id)) { fail(response, 409, 'report_in_progress'); return; }
+        reporting.add(id);
+        try {
+          const report = await writeReport(config.text, entry.scenario, entry.lines);
+          pending.delete(id);
+          log('kid_report_written', { session: id, scenario: entry.scenario.id });
+          send(response, 200, { report });
+        } catch (error) {
+          // The transcript stays pending, so the browser can retry.
+          log('kid_report_failed', { session: id, category: error instanceof Error ? error.message.slice(0, 40) : 'unknown' });
+          fail(response, 502, 'report_failed');
+        } finally { reporting.delete(id); }
         return;
       }
       if (path.startsWith('/api/')) { fail(response, 404, 'not_found'); return; }
@@ -121,14 +151,20 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
     if (url.pathname !== '/api/live') return reject(404, 'not_found');
     if (!sameOrigin(request)) return reject(403, 'origin_rejected');
     if (!auth.authenticated(request)) return reject(401, 'sign_in_required');
-    const module = language(url.searchParams.get('language') ?? '');
-    if (!module) return reject(400, 'invalid_language');
+    const chosen = livePlan(url.searchParams);
+    if ('error' in chosen) return reject(400, chosen.error);
     if (active) return reject(409, 'session_active');
-    const allowed = usage.summary(limits).nextSessionSeconds;
+    // The page may ask for less time, e.g. a child's remaining daily minutes set by a parent.
+    const requested = Number(url.searchParams.get('seconds') || Infinity);
+    const allowed = Math.floor(Math.min(usage.summary(limits).nextSessionSeconds, requested > 0 ? requested : Infinity));
     if (allowed < config.minimumStartSeconds) return reject(429, 'quota_exhausted');
     sockets.handleUpgrade(request, socket, head, client => {
       if (active) { client.close(1013, 'session_active'); return; }
-      const relay = new LiveRelay(client, module, allowed, config, usage, log, () => { if (active === relay) active = undefined; });
+      const relay = new LiveRelay(client, chosen.plan, allowed, config, usage, log, transcript => {
+        if (active === relay) active = undefined;
+        const scenario = kidScenario(chosen.scenario ?? '');
+        if (scenario && transcript.length) pending.keep(relay.id, scenario, transcript);
+      });
       active = relay;
     });
   });
