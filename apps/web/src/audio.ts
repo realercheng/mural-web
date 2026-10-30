@@ -1,8 +1,10 @@
+import { decodeMulaw } from '../server/src/wire';
+
 const OUTPUT_RATE = 24_000;
 
 /** Microphone capture and speech playback through one AudioContext. */
 export class AudioEngine {
-  onChunk: (pcm: ArrayBuffer) => void = () => {};
+  onChunk: (pcm: Int16Array, level: number) => void = () => {};
   inputLevel = 0;
   private context?: AudioContext;
   private stream?: MediaStream;
@@ -27,7 +29,7 @@ export class AudioEngine {
     const capture = new AudioWorkletNode(context, 'pcm-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
     capture.port.onmessage = (event: MessageEvent<{ pcm: ArrayBuffer; level: number }>) => {
       this.inputLevel = event.data.level;
-      this.onChunk(event.data.pcm);
+      this.onChunk(new Int16Array(event.data.pcm), event.data.level);
     };
     const silent = context.createGain();
     silent.gain.value = 0;
@@ -40,11 +42,13 @@ export class AudioEngine {
 
   mute(muted: boolean): void { this.capture?.port.postMessage({ muted }); }
 
-  play(base64: string): void {
+  /** Seconds of received speech still waiting to play; growth means the network is behind. */
+  get backlog(): number { return this.context ? Math.max(0, this.nextPlayback - this.context.currentTime) : 0; }
+
+  play(mulaw: Uint8Array): void {
     const context = this.context, analyser = this.analyser;
     if (!context || !analyser) return;
-    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-    const pcm = new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+    const pcm = decodeMulaw(mulaw);
     if (!pcm.length) return;
     const buffer = context.createBuffer(1, pcm.length, OUTPUT_RATE);
     const channel = buffer.getChannelData(0);
@@ -78,9 +82,25 @@ export class AudioEngine {
   }
 }
 
-export function toBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(binary);
+/**
+ * Sends speech only. Quiet chunks are held briefly so a word's soft start is not lost, and a
+ * one-byte heartbeat each second tells the gateway the microphone pipeline is still running.
+ */
+export class SpeechGate {
+  private held: Int16Array[] = [];
+  private openUntil = 0;
+  private quietChunks = 0;
+  sentChunks = 0;
+  constructor(private readonly send: (pcm: Int16Array | null) => void, private readonly threshold = 0.008,
+              private readonly hangoverMs = 1_000, private readonly preRollChunks = 3) {}
+
+  push(pcm: Int16Array, level: number, now = Date.now()): void {
+    if (level >= this.threshold) {
+      this.held.forEach(chunk => this.send(chunk)); this.sentChunks += this.held.length; this.held = [];
+      this.openUntil = now + this.hangoverMs;
+    }
+    if (now < this.openUntil) { this.send(pcm); this.sentChunks++; this.quietChunks = 0; return; }
+    this.held = [...this.held, pcm].slice(-this.preRollChunks);
+    if (++this.quietChunks % 10 === 0) this.send(null);
+  }
 }

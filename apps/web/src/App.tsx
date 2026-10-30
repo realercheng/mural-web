@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
-import { AudioEngine, toBase64 } from './audio';
+import { AudioEngine, SpeechGate } from './audio';
+import { encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT } from '../server/src/wire';
 
 interface Usage { todaySeconds: number; totalSeconds: number; remainingSeconds: number; nextSessionSeconds: number }
 interface Language { id: string; name: string; nativeName: string }
@@ -112,17 +113,22 @@ export function App() {
     if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(lock => { wakeLock.current = lock; }).catch(() => note('无法保持屏幕常亮'));
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/live?language=${encodeURIComponent(languageID)}`);
     socket.current = ws;
-    audio.onChunk = pcm => {
-      if (ws.readyState === WebSocket.OPEN && startedAt.current) ws.send(JSON.stringify({ type: 'session.input_audio.append', audio: toBase64(pcm) }));
-    };
+    ws.binaryType = 'arraybuffer';
+    const gate = new SpeechGate(pcm => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(pcm ? frame(FRAME_AUDIO, encodeMulaw(pcm)) : frame(FRAME_HEARTBEAT));
+    });
+    let maxBacklog = 0;
+    audio.onChunk = (pcm, level) => { if (startedAt.current) gate.push(pcm, level); };
     ws.onmessage = event => {
+      if (event.data instanceof ArrayBuffer) {
+        const bytes = new Uint8Array(event.data);
+        if (bytes[0] === FRAME_AUDIO) { audio.play(bytes.subarray(1)); maxBacklog = Math.max(maxBacklog, audio.backlog); }
+        return;
+      }
       const data = JSON.parse(event.data as string);
       switch (data.type) {
         case 'mural.session':
           startedAt.current = Date.now(); setAllowed(data.allowedSeconds); setPhase('active'); note('对话已开始');
-          break;
-        case 'session.output_audio.delta':
-          audio.play(data.audio ?? data.delta ?? '');
           break;
         case 'session.input_transcript.delta':
         case 'session.output_transcript.delta': {
@@ -139,6 +145,7 @@ export function App() {
           break;
         case 'mural.ended':
           note(`对话结束：${REASONS[data.reason] ?? data.reason}，计时 ${minutes(data.seconds)}${data.confirmed ? '' : '（按连接时长估算）'}`);
+          note(`网络：下行 ${data.traffic?.toClientKB ?? '?'} KB，上行 ${data.traffic?.fromClientKB ?? '?'} KB，服务器待发积压最多 ${data.traffic?.maxBufferedKB ?? '?'} KB，本机播放积压最多 ${maxBacklog.toFixed(1)} 秒`);
           if (data.reason !== 'ended_by_learner') setMessage(`对话已结束：${REASONS[data.reason] ?? data.reason}`);
           break;
       }
