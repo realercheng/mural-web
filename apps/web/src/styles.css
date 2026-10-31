@@ -46,9 +46,13 @@ header { text-align: center; }
 @keyframes pulse { 50% { opacity: 0.65; } }
 .controls { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 0.6rem 1rem; }
 .transcript { width: 100%; display: flex; flex-direction: column; gap: 0.5rem; }
-.transcript p { margin: 0; padding: 0.6rem 0.8rem; border-radius: 1rem; line-height: 1.4; max-width: 90%; }
-.transcript .assistant { background: white; align-self: flex-start; }
-.transcript .user { background: var(--lilac); align-self: flex-end; }
+.transcript .line { display: flex; flex-direction: column; max-width: 90%; gap: 0.15rem; }
+.transcript .line p { margin: 0; padding: 0.6rem 0.8rem; border-radius: 1rem; line-height: 1.4; }
+.transcript .line .time { font-size: 0.7rem; color: var(--secondary); padding: 0 0.4rem; }
+.transcript .assistant { align-self: flex-start; }
+.transcript .assistant p { background: white; }
+.transcript .user { align-self: flex-end; align-items: flex-end; }
+.transcript .user p { background: var(--lilac); }
 .diagnostics { width: 100%; margin-top: auto; color: var(--secondary); }
 .diagnostics summary { font-size: 0.85rem; }
 .topbar { display: grid; grid-template-columns: minmax(4.5rem, auto) 1fr minmax(4.5rem, auto); align-items: center; width: 100%; gap: 0.5rem; }
@@ -85,3 +89,4 @@ header { text-align: center; }
 .report ul { padding-left: 1.2rem; }
 .tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
 .list-item.selected { background: var(--ink); color: var(--cream); border-color: var(--ink); }
+.section-title { font-size: 1rem; align-self: flex-start; margin: 0.5rem 0 0; }

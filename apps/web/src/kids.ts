@@ -2,6 +2,7 @@
 // per-child daily minutes and the parent password hash. The server keeps none of them.
 import { useCallback, useState } from 'react';
 import type { KidReport } from '../server/src/kids';
+import type { Line } from './transcript';
 
 export type { KidReport };
 export type Level = 1 | 2 | 3 | 4;
@@ -12,7 +13,9 @@ export interface Scenario { id: string; category: Category; titleZh: string; tit
 export interface Profile { id: string; nickname: string; level: Level; dailyMinutes: number; stars: number; createdAt: string }
 export interface SavedReport {
   id: string; profileID: string; scenarioID: string; scenarioTitle: string; startedAt: string; seconds: number;
-  stars: number; status: 'ok' | 'failed' | 'none'; report?: KidReport;
+  stars: number; status: 'ok' | 'failed' | 'none' | 'off'; report?: KidReport;
+  /** The conversation text, so parent and child can read it again. */
+  transcript?: Line[];
 }
 interface KidData {
   version: 1;
@@ -26,6 +29,8 @@ interface KidData {
 const KEY = 'mural.kids.v1';
 export const STARS_PER_STICKER = 5;
 export const MAX_STARS_PER_TALK = 10;
+/** Conversation texts kept, newest first (about 5 KB each); older records keep only their report. */
+const MAX_TRANSCRIPTS = 100;
 export const STICKERS = ['🦁', '🐼', '🦄', '🚀', '🌈', '🍉', '🐬', '🦕', '🎈', '🐝', '🍦', '🐢', '🦋', '🌻', '🐧', '🎨', '🦊', '🍓', '🐳', '🏆'];
 export const AVATARS: Record<Level, string> = { 1: '🐣', 2: '🐥', 3: '🦉', 4: '🦅' };
 export const NICKNAME = /^[\p{L}\p{N} ]{1,12}$/u;
@@ -54,7 +59,12 @@ export function useKids() {
   const [data, setData] = useState(load);
   const update = useCallback((change: (draft: KidData) => KidData) => setData(current => {
     const next = change(current);
-    localStorage.setItem(KEY, JSON.stringify(next));
+    try { localStorage.setItem(KEY, JSON.stringify(next)); } catch {
+      // Storage is full: keep reports, drop the text of the older half of the conversations.
+      const keep = Math.floor(next.reports.length / 2);
+      next.reports = next.reports.map((report, index) => (index < keep ? report : { ...report, transcript: undefined }));
+      localStorage.setItem(KEY, JSON.stringify(next));
+    }
     return next;
   }), []);
 
@@ -86,7 +96,8 @@ export function useKids() {
     /** Saves the report and adds its stars to the child's total. */
     addReport: (saved: SavedReport) => update(d => ({
       ...d,
-      reports: [saved, ...d.reports.filter(r => r.id !== saved.id)].slice(0, 300),
+      reports: [saved, ...d.reports.filter(r => r.id !== saved.id)].slice(0, 300)
+        .map((report, index) => (index < MAX_TRANSCRIPTS ? report : { ...report, transcript: undefined })),
       profiles: d.profiles.map(p => (p.id === saved.profileID ? { ...p, stars: p.stars + saved.stars } : p)),
     })),
     setParentPassword: async (password: string) => {

@@ -1,4 +1,4 @@
-import { minutes, type Live } from './live';
+import { minutes, type Line, type Live } from './live';
 
 export function TopBar({ title, onBack, children }: { title: string; onBack?: () => void; children?: React.ReactNode }) {
   return (
@@ -30,10 +30,25 @@ export function Conversation({ live, idleLabel, onStart, onStop, stopLabel, disa
         </div>
       )}
       {live.message && <p className="error">{live.message}</p>}
-      <section className="transcript" aria-live="polite">
-        {live.lines.map((line, index) => <p key={index} className={line.speaker}>{line.text}</p>)}
-      </section>
+      <Transcript lines={live.lines} newestFirst />
     </>
+  );
+}
+
+const clockTime = (iso: string) => new Date(iso).toLocaleTimeString('zh-CN', { hour12: false });
+
+/** Conversation text with a time on each line. During a call the newest line is on top, so no scrolling is needed. */
+export function Transcript({ lines, newestFirst = false }: { lines: Line[]; newestFirst?: boolean }) {
+  const ordered = newestFirst ? [...lines].reverse() : lines;
+  return (
+    <section className="transcript" aria-live="polite">
+      {ordered.map((line, index) => (
+        <div key={newestFirst ? lines.length - index : index} className={`line ${line.speaker}`}>
+          <span className="time">{line.speaker === 'user' ? '我' : 'Mural'} · {clockTime(line.time)}</span>
+          <p>{line.text}</p>
+        </div>
+      ))}
+    </section>
   );
 }
 

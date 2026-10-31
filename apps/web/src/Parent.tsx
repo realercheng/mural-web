@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { TopBar } from './common';
+import { TopBar, Transcript } from './common';
 import { NICKNAME, type Kids, type Level, type LevelInfo, type Profile, type SavedReport } from './kids';
 import { minutes } from './live';
 
@@ -32,7 +32,7 @@ export function ParentArea({ kids, levels, serverUsage, onBack }: { kids: Kids; 
           {items.map(item => (
             <button key={item.id} className="list-item" onClick={() => setView({ name: 'report', profile: view.profile, saved: item })}>
               <strong>{new Date(item.startedAt).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · {item.scenarioTitle}</strong>
-              <span className="muted small">{minutes(item.seconds)} · ⭐ {item.stars} · {item.status === 'ok' ? item.report?.summary : item.status === 'none' ? '没有识别到孩子说话' : '报告未生成'}</span>
+              <span className="muted small">{minutes(item.seconds)} · ⭐ {item.stars} · {item.status === 'ok' ? item.report?.summary : item.status === 'none' ? '没有识别到孩子说话' : item.status === 'off' ? '未开启报告' : '报告未生成'}</span>
             </button>
           ))}
         </div>
@@ -154,7 +154,7 @@ function ReportDetail({ saved, onBack }: { saved: SavedReport; onBack: () => voi
     <main className="screen">
       <TopBar title={saved.scenarioTitle} onBack={onBack} />
       <p className="muted">{new Date(saved.startedAt).toLocaleString('zh-CN', { hour12: false })} · {minutes(saved.seconds)} · ⭐ {saved.stars}</p>
-      {!report && <p className="muted">{saved.status === 'none' ? '这次没有识别到孩子说英语，所以没有报告。' : '这次的报告没有生成成功。'}</p>}
+      {!report && <p className="muted">{saved.status === 'none' ? '这次没有识别到孩子说英语，所以没有报告。' : saved.status === 'off' ? '服务器未开启家长报告。' : '这次的报告没有生成成功。'}</p>}
       {report && (
         <section className="report">
           <p>{report.summary}</p>
@@ -174,6 +174,7 @@ function ReportDetail({ saved, onBack }: { saved: SavedReport; onBack: () => voi
           <p className="small muted">报告由文字模型根据语音转写生成，可能有误差。</p>
         </section>
       )}
+      {saved.transcript?.length ? <><h2 className="section-title">聊天记录</h2><Transcript lines={saved.transcript} /></> : null}
     </main>
   );
 }

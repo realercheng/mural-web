@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AudioEngine, SpeechGate } from './audio';
+import { buildLines, type Delta, type Line } from './transcript';
 import { encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT, readOutputFrame } from '../server/src/wire';
 
-export interface Line { speaker: 'user' | 'assistant'; text: string }
 export type LivePhase = 'idle' | 'connecting' | 'active' | 'closing';
-export interface Ended { sessionID?: string; reason: string; seconds: number; confirmed: boolean }
+export type { Line };
+export interface Ended { sessionID?: string; reason: string; seconds: number; confirmed: boolean; lines: Line[] }
 
 const REASONS: Record<string, string> = {
   ended_by_learner: '你结束了对话', said_goodbye: '已说再见', time_limit: '已到本次时长上限', idle_audio: '麦克风音频中断（可能切到后台或锁屏）',
@@ -34,6 +35,8 @@ export function useLive(refresh: () => void) {
   const engine = useRef<AudioEngine | undefined>(undefined);
   const wakeLock = useRef<WakeLockSentinel | null>(null);
   const startedAt = useRef(0);
+  const deltas = useRef<Delta[]>([]);
+  const shownAt = useRef(0);
 
   const note = useCallback((text: string) => setDiagnostics(items => [`${clock()} ${text}`, ...items].slice(0, 40)), []);
 
@@ -54,6 +57,12 @@ export function useLive(refresh: () => void) {
       const current = engine.current;
       if (current) setLevel(Math.min(1, Math.max(current.inputLevel, current.outputLevel()) * 4));
       if (startedAt.current) setElapsed((Date.now() - startedAt.current) / 1000);
+      // Mural's words appear as their speech plays; refresh a few times a second.
+      if (startedAt.current && Date.now() - shownAt.current > 200) {
+        shownAt.current = Date.now();
+        const next = buildLines(deltas.current, startedAt.current, current?.playedMs() ?? -Infinity, Date.now());
+        setLines(items => (JSON.stringify(items) === JSON.stringify(next) ? items : next));
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
@@ -73,6 +82,7 @@ export function useLive(refresh: () => void) {
   }, [refresh]);
 
   const start = async (query: Record<string, string>, onEnded?: (ended: Ended) => void) => {
+    deltas.current = [];
     setMessage(''); setLines([]); setElapsed(0); setWrapping(false); setPhase('connecting');
     const audio = new AudioEngine();
     engine.current = audio;
@@ -120,12 +130,10 @@ export function useLive(refresh: () => void) {
           break;
         case 'session.input_transcript.delta':
         case 'session.output_transcript.delta': {
-          const speaker = data.type === 'session.input_transcript.delta' ? 'user' : 'assistant';
-          setLines(items => {
-            const last = items[items.length - 1];
-            if (last?.speaker === speaker) return [...items.slice(0, -1), { speaker, text: last.text + data.delta }];
-            return [...items, { speaker, text: data.delta }];
-          });
+          if (typeof data.delta !== 'string') break;
+          const startMs = typeof data.start_ms === 'number' ? data.start_ms : (deltas.current.at(-1)?.startMs ?? 0);
+          deltas.current.push({ speaker: data.type === 'session.input_transcript.delta' ? 'user' : 'assistant', text: data.delta, startMs, arrivedAt: Date.now() });
+          shownAt.current = 0;
           break;
         }
         case 'error':
@@ -137,7 +145,9 @@ export function useLive(refresh: () => void) {
           note(`对话结束：${REASONS[data.reason] ?? data.reason}，计时 ${minutes(data.seconds)}${data.confirmed ? '' : '（按连接时长估算）'}`);
           note(`网络：下行 ${data.traffic?.toClientKB ?? '?'} KB，上行 ${data.traffic?.fromClientKB ?? '?'} KB，服务器待发积压最多 ${data.traffic?.maxBufferedKB ?? '?'} KB，本机播放积压最多 ${maxBacklog.toFixed(1)} 秒，断流 ${audio.clock.underruns} 次，追回延迟 ${audio.clock.catchUps} 次，缓冲 ${audio.clock.jitterBuffer.toFixed(2)} 秒`);
           if (!EXPECTED.has(data.reason)) setMessage(current => current || `对话已结束：${REASONS[data.reason] ?? data.reason}`);
-          onEnded?.({ sessionID, reason: data.reason, seconds: data.seconds, confirmed: data.confirmed });
+          const lines = buildLines(deltas.current, startedAt.current || Date.now());
+          setLines(lines);
+          onEnded?.({ sessionID, reason: data.reason, seconds: data.seconds, confirmed: data.confirmed, lines });
           break;
       }
     };
@@ -164,10 +174,13 @@ export function useLive(refresh: () => void) {
     setWrapping(true);
   };
 
+  /** Empties the screen, e.g. when another child or topic is chosen. */
+  const clear = () => { if (socket.current) return; deltas.current = []; setLines([]); setMessage(''); };
+
   const toggleMute = () => { const next = !muted; setMuted(next); engine.current?.mute(next); };
   const busy = phase !== 'idle';
 
-  return { phase, busy, message, setMessage, lines, muted, elapsed, allowed, wrapping, diagnostics, level, start, end, wrapUp, toggleMute };
+  return { phase, busy, message, setMessage, lines, muted, elapsed, allowed, wrapping, diagnostics, level, start, end, wrapUp, toggleMute, clear };
 }
 
 export type Live = ReturnType<typeof useLive>;

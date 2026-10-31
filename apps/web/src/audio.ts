@@ -44,6 +44,9 @@ export class AudioEngine {
   mute(muted: boolean): void { this.capture?.port.postMessage({ muted }); }
 
   /** Seconds of received speech still waiting to play; growth means the network is behind. */
+  /** Milliseconds of the provider timeline played so far; -Infinity before any speech. */
+  playedMs(): number { return this.context ? this.clock.position(this.context.currentTime) * 1_000 : -Infinity; }
+
   get backlog(): number { return this.context ? this.clock.backlog(this.context.currentTime) : 0; }
 
   play(mulaw: Uint8Array, offsetSamples: number): void {

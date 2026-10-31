@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Conversation, Diagnostics, TopBar } from './common';
+import { Conversation, Diagnostics, TopBar, Transcript } from './common';
 import { AVATARS, MAX_STARS_PER_TALK, STARS_PER_STICKER, STICKERS, stickers, type Category, type Kids, type LevelInfo, type Profile, type SavedReport, type Scenario } from './kids';
 import { minutes, type Ended, type Live } from './live';
 import { ParentArea } from './Parent';
 
-type View = 'profiles' | 'scenarios' | 'talk' | 'stickers' | 'parent';
+type View = 'profiles' | 'scenarios' | 'talk' | 'stickers' | 'history' | 'parent';
 interface Result { status: 'writing' | 'ok' | 'none' | 'failed' | 'off'; saved?: SavedReport; newStickers: number; sessionID?: string }
 
 const avatar = (profile: Profile) => AVATARS[profile.level];
@@ -19,13 +19,18 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
   const [scenario, setScenario] = useState<Scenario>();
   const [result, setResult] = useState<Result>();
   const [category, setCategory] = useState<Category>('daily');
+  const [record, setRecord] = useState<SavedReport>();
   const levelName = (profile: Profile) => `难度 ${profile.level} ${levels.find(item => item.level === profile.level)?.nameZh ?? ''}`;
   const profile = kids.profiles.find(item => item.id === profileID);
 
   const writeReport = async (current: Profile, item: Scenario, ended: Ended, recordID: string) => {
     const base: SavedReport = { id: recordID, profileID: current.id, scenarioID: item.id, scenarioTitle: item.titleZh,
-                                startedAt: new Date(Date.now() - ended.seconds * 1_000).toISOString(), seconds: ended.seconds, stars: 0, status: 'failed' };
-    if (!reportsEnabled || !ended.sessionID) { setResult({ status: 'off', newStickers: 0 }); return; }
+                                startedAt: new Date(Date.now() - ended.seconds * 1_000).toISOString(), seconds: ended.seconds, stars: 0, status: 'failed',
+                                transcript: ended.lines };
+    if (!reportsEnabled || !ended.sessionID) {
+      const saved = { ...base, status: 'off' as const };
+      kids.addReport(saved); setResult({ status: 'off', saved, newStickers: 0 }); return;
+    }
     setResult({ status: 'writing', newStickers: 0, sessionID: ended.sessionID });
     try {
       const response = await fetch('/api/kid/report', {
@@ -63,7 +68,7 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
 
   const retry = () => {
     if (!profile || !scenario || !result?.saved || !result.sessionID) return;
-    writeReport(profile, scenario, { sessionID: result.sessionID, reason: 'retry', seconds: result.saved.seconds, confirmed: true }, result.saved.id);
+    writeReport(profile, scenario, { sessionID: result.sessionID, reason: 'retry', seconds: result.saved.seconds, confirmed: true, lines: result.saved.transcript ?? [] }, result.saved.id);
   };
 
   if (view === 'parent') return <ParentArea kids={kids} levels={levels} serverUsage={serverUsage} onBack={() => setView('profiles')} />;
@@ -74,7 +79,7 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
       {kids.profiles.length === 0 && <p className="muted center-text">还没有孩子档案。请家长点下面的“家长设置”创建。</p>}
       <div className="cards">
         {kids.profiles.map(item => (
-          <button key={item.id} className="card kid" onClick={() => { setProfileID(item.id); setView('scenarios'); }}>
+          <button key={item.id} className="card kid" onClick={() => { setProfileID(item.id); setResult(undefined); live.clear(); setView('scenarios'); }}>
             <span className="avatar">{avatar(item)}</span>
             <strong>{item.nickname}</strong>
             <span className="muted">{levelName(item)} · ⭐ {item.stars}</span>
@@ -102,11 +107,37 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
     </main>
   );
 
+  if (view === 'history') {
+    const items = kids.reports.filter(item => item.profileID === profile.id && item.transcript?.length);
+    if (record) return (
+      <main className="screen">
+        <TopBar title={record.scenarioTitle} onBack={() => setRecord(undefined)} />
+        <p className="muted">{new Date(record.startedAt).toLocaleString('zh-CN', { hour12: false })} · {minutes(record.seconds)} · ⭐ {record.stars}</p>
+        <Transcript lines={record.transcript ?? []} />
+      </main>
+    );
+    return (
+      <main className="screen">
+        <TopBar title="我的聊天记录" onBack={() => setView('scenarios')} />
+        {items.length === 0 && <p className="muted">还没有聊天记录。</p>}
+        <div className="list">
+          {items.map(item => (
+            <button key={item.id} className="list-item" onClick={() => setRecord(item)}>
+              <strong>{new Date(item.startedAt).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · {item.scenarioTitle}</strong>
+              <span className="muted small">{minutes(item.seconds)} · ⭐ {item.stars} · {item.transcript!.length} 句</span>
+            </button>
+          ))}
+        </div>
+      </main>
+    );
+  }
+
   if (view === 'scenarios' || !scenario) return (
     <main className="screen">
       <TopBar title={`${avatar(profile)} ${profile.nickname}`} onBack={() => setView('profiles')}>
         <button className="chip" onClick={() => setView('stickers')}>⭐ {profile.stars} · 贴纸 {owned.length}</button>
       </TopBar>
+      <button className="secondary" onClick={() => { setRecord(undefined); setView('history'); }}>📖 我的聊天记录</button>
       <p className="muted">{levelName(profile)} · 今天还可以练 {minutes(kids.remainingToday(profile))}</p>
       <div className="tabs" role="tablist">
         {CATEGORIES.map(item => (
@@ -117,7 +148,7 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
       {category === 'news' && <p className="small muted center-text">Mural 不会上网查新闻。请孩子讲自己听到的新闻，Mural 帮孩子用英语说出来。</p>}
       <div className="cards">
         {scenarios.filter(item => item.category === category).map(item => (
-          <button key={item.id} className="card scenario" onClick={() => { setScenario(item); setResult(undefined); live.setMessage(''); setView('talk'); }}>
+          <button key={item.id} className="card scenario" onClick={() => { setScenario(item); setResult(undefined); live.clear(); setView('talk'); }}>
             <strong>{item.titleZh}</strong>
             <span className="muted">{item.titleEn}</span>
             <span className="small">🎲 {item.gameZh} · 约 {item.minutes} 分钟</span>
@@ -134,7 +165,10 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
         <span className="muted">⭐ {profile.stars}</span>
       </TopBar>
       <p className="muted">{scenario.titleEn} · 🎲 {scenario.gameZh} · {levelName(profile)}</p>
-      {result && !live.busy ? <ResultPanel result={result} profile={profile} onRetry={retry} onAgain={() => setView('scenarios')} /> : (
+      {result && !live.busy ? <>
+        <ResultPanel result={result} profile={profile} onRetry={retry} onAgain={() => { live.clear(); setView('scenarios'); }} />
+        <Transcript lines={live.lines} newestFirst />
+      </> : (
         <Conversation live={live} idleLabel="开始" stopLabel={stopLabel} onStart={start} onStop={live.wrapping ? live.end : live.wrapUp}
                       disabled={kids.remainingToday(profile) < MINIMUM_SECONDS}
                       extra={live.phase === 'active' && !live.wrapping ? <button className="secondary" onClick={live.end}>立即结束</button> : undefined} />

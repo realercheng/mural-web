@@ -112,6 +112,7 @@ test('kid instructions follow the level, review words and safety rules', () => {
   assert.match(starter, /at most two times/);
   assert.match(starter, /Correct every grammar or word error, even when the meaning is clear/);
   assert.match(starter, /say the whole sentence once/);
+  assert.match(starter, /explain in ONE short, simple Mandarin Chinese sentence what was wrong and how to fix it/);
   assert.doesNotMatch(starter, /small slips/);
   assert.match(starter, /private details/);
   assert.match(starter, /talk with a parent or teacher/);
