@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type { Config } from './config.js';
 import type { LanguageContent } from './languages.js';
-import { greeting, voiceInstructions } from './policy.js';
+import type { TranscriptLine } from './report.js';
 import type { UsageStore } from './usage.js';
 import { decodeMulaw, encodeMulaw, FRAME_AUDIO, FRAME_HEARTBEAT, isSilent, outputFrame } from './wire.js';
 
@@ -16,6 +16,21 @@ const MAX_AUDIO_SAMPLES = 24_000;
 // so the gateway fills quiet periods with 100 ms of digital silence.
 const SILENCE = Buffer.alloc(4_800).toString('base64');
 const SILENCE_AFTER_MS = 300;
+const MAX_TRANSCRIPT_CHARS = 60_000;
+// Seconds between a wrap-up request and the end of the call, so Mural can say goodbye.
+const WRAP_UP_SECONDS = 60;
+
+/** What the server tells GPT-Live for one conversation. The browser cannot change any of it. */
+export interface LivePlan {
+  module: LanguageContent;
+  mode: 'adult' | 'kid';
+  instructions: string;
+  greeting: string;
+  /** Sent once, a minute before the time limit or when the learner asks to finish. */
+  wrapUp?: string;
+  /** Keep the transcript in memory for a report after the call. */
+  keepTranscript: boolean;
+}
 
 /**
  * Relays one browser conversation to GPT-Live over WebSocket. The provider key never
@@ -36,18 +51,21 @@ export class LiveRelay {
   private finalSeconds?: number;
   private reason = 'unknown';
   private readonly timers: NodeJS.Timeout[] = [];
+  private readonly transcript: TranscriptLine[] = [];
+  private transcriptChars = 0;
+  private wrappedUp = false;
 
-  constructor(private readonly client: WebSocket, private readonly module: LanguageContent, private readonly allowedSeconds: number,
+  constructor(private readonly client: WebSocket, private readonly plan: LivePlan, private readonly allowedSeconds: number,
               private readonly config: Config, private readonly usage: UsageStore, private readonly log: Log,
-              private readonly onFinish: () => void) {
+              private readonly onFinish: (transcript: TranscriptLine[]) => void) {
     this.upstream = new WebSocket(config.upstreamURL, {
       headers: { Authorization: `Bearer ${config.upstreamKey}` }, handshakeTimeout: 15_000,
       maxPayload: 8 * 1024 * 1024, perMessageDeflate: false, followRedirects: false,
     });
-    this.log('live_connecting', { session: this.id, language: module.id, allowedSeconds });
+    this.log('live_connecting', { session: this.id, language: plan.module.id, mode: plan.mode, allowedSeconds });
     this.upstream.on('open', () => this.sendUpstream({
       type: 'session.start', event_id: `mural_start_${this.id}`,
-      session: { model: config.model, instructions: voiceInstructions(module), audio: { output: { voice: config.voice } },
+      session: { model: config.model, instructions: plan.instructions, audio: { output: { voice: config.voice } },
                  delegation: { type: 'client' } },
     }));
     this.upstream.on('message', (data, binary) => this.fromUpstream(data, binary));
@@ -64,6 +82,8 @@ export class LiveRelay {
     this.timers.push(setTimeout(() => { if (this.state === 'connecting') this.finish('start_timeout'); }, 20_000));
   }
 
+  private get module(): LanguageContent { return this.plan.module; }
+
   private fromUpstream(data: WebSocket.RawData, binary: boolean): void {
     if (binary || this.state === 'ended') return;
     const raw = data.toString();
@@ -74,15 +94,18 @@ export class LiveRelay {
         if (this.state !== 'connecting') break;
         this.state = 'active'; this.startedAt = Date.now(); this.lastAliveAt = Date.now();
         this.sendUpstream({ type: 'session.instructions.append', event_id: `mural_greeting_${this.id}`, delegation_id: null,
-                            content: greeting(this.module) });
+                            content: this.plan.greeting });
         this.timers.push(setTimeout(() => this.requestClose('time_limit'), this.allowedSeconds * 1_000));
+        if (this.plan.wrapUp && this.allowedSeconds >= 2 * WRAP_UP_SECONDS)
+          this.timers.push(setTimeout(() => this.wrapUp(false), (this.allowedSeconds - WRAP_UP_SECONDS) * 1_000));
         this.timers.push(setInterval(() => {
           if (this.state !== 'active') return;
           const now = Date.now();
           if (now - this.lastAliveAt > this.config.idleAudioSeconds * 1_000) { this.requestClose('idle_audio'); return; }
           if (now - this.lastForwardedAt > SILENCE_AFTER_MS) this.sendUpstream({ type: 'session.input_audio.append', audio: SILENCE });
         }, 100));
-        this.sendClient({ type: 'mural.session', sessionID: this.id, allowedSeconds: this.allowedSeconds, language: this.module.id });
+        this.sendClient({ type: 'mural.session', sessionID: this.id, allowedSeconds: this.allowedSeconds, language: this.module.id,
+                          mode: this.plan.mode });
         this.log('live_started', { session: this.id });
         break;
       case 'session.delegation.created':
@@ -113,6 +136,10 @@ export class LiveRelay {
         this.sendClientBinary(outputFrame(offset, encodeMulaw(pcm)));
         return;
       }
+      case 'session.input_transcript.delta':
+      case 'session.output_transcript.delta':
+        this.keepTranscript(event.type === 'session.input_transcript.delta' ? 'child' : 'mural', (event as { delta?: unknown }).delta);
+        break;
       case 'error':
         this.log('live_provider_error', { session: this.id });
         break;
@@ -126,6 +153,7 @@ export class LiveRelay {
       let event: { type?: unknown };
       try { event = JSON.parse(data.toString()); } catch { return; }
       if (event.type === 'session.close') this.requestClose('ended_by_learner');
+      if (event.type === 'mural.wrap_up') this.wrapUp(true);
       return;
     }
     const bytes = data instanceof Buffer ? data : Buffer.concat(Array.isArray(data) ? data : [Buffer.from(data as ArrayBuffer)]);
@@ -137,6 +165,25 @@ export class LiveRelay {
     const pcm = decodeMulaw(bytes.subarray(1));
     this.lastAliveAt = this.lastForwardedAt = Date.now();
     this.sendUpstream({ type: 'session.input_audio.append', audio: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
+  }
+
+  /** Asks Mural to finish with its closing routine, then ends the call after a short goodbye. */
+  private wrapUp(requested: boolean): void {
+    if (this.state !== 'active' || !this.plan.wrapUp || this.wrappedUp) return;
+    this.wrappedUp = true;
+    this.sendUpstream({ type: 'session.instructions.append', event_id: `mural_wrap_up_${this.id}`, delegation_id: null, content: this.plan.wrapUp });
+    if (requested) this.timers.push(setTimeout(() => this.requestClose('said_goodbye'), WRAP_UP_SECONDS * 1_000));
+    this.sendClient({ type: 'mural.wrapping_up', seconds: WRAP_UP_SECONDS });
+    this.log('live_wrap_up', { session: this.id, requested });
+  }
+
+  /** Merges transcript deltas per speaker. Held in memory only, and only when the plan needs a report. */
+  private keepTranscript(speaker: TranscriptLine['speaker'], delta: unknown): void {
+    if (!this.plan.keepTranscript || typeof delta !== 'string' || this.transcriptChars + delta.length > MAX_TRANSCRIPT_CHARS) return;
+    this.transcriptChars += delta.length;
+    const last = this.transcript.at(-1);
+    if (last?.speaker === speaker) last.text += delta;
+    else this.transcript.push({ speaker, text: delta });
   }
 
   requestClose(reason: string): void {
@@ -165,7 +212,7 @@ export class LiveRelay {
     this.log('live_ended', { session: this.id, reason, seconds: Math.round(seconds * 10) / 10, confirmed, ...traffic });
     this.sendClient({ type: 'mural.ended', reason, seconds, confirmed, traffic });
     if (this.client.readyState === WebSocket.OPEN) this.client.close(1000, 'ended');
-    this.onFinish();
+    this.onFinish(this.transcript);
   }
 
   private sendUpstream(event: Record<string, unknown>): void {

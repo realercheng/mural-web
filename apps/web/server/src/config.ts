@@ -13,6 +13,8 @@ export interface Config {
   sessionHours: number;
   maxSessionSeconds: number;
   dailyLimitSeconds: number;
+  /** Calendar month in `timeZone`. */
+  monthlyLimitSeconds: number;
   totalLimitSeconds: number;
   minimumStartSeconds: number;
   idleAudioSeconds: number;
@@ -21,6 +23,8 @@ export interface Config {
   dataDir: string;
   staticDir: string;
   timeZone: string;
+  /** Responses API for kid-mode parent reports; reports are off when unset. */
+  text?: { url: string; key: string; model: string };
 }
 
 function text(env: NodeJS.ProcessEnv, name: string, fallback?: string): string {
@@ -57,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sessionHours: seconds(env, 'SESSION_HOURS', 12, 24 * 30),
     maxSessionSeconds: seconds(env, 'MAX_SESSION_SECONDS', 600, 3_600),
     dailyLimitSeconds: seconds(env, 'DAILY_LIMIT_SECONDS', 1_200, 86_400),
+    monthlyLimitSeconds: seconds(env, 'MONTHLY_LIMIT_SECONDS', 36_000, 2_678_400),
     totalLimitSeconds: seconds(env, 'TOTAL_LIMIT_SECONDS', 2_400, 10_000_000),
     minimumStartSeconds: seconds(env, 'MINIMUM_START_SECONDS', 30, 600),
     idleAudioSeconds: seconds(env, 'IDLE_AUDIO_SECONDS', 10, 600),
@@ -65,5 +70,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dataDir: text(env, 'DATA_DIR', '/data'),
     staticDir: resolve(text(env, 'STATIC_DIR', 'dist')),
     timeZone: text(env, 'USAGE_TIME_ZONE', 'Asia/Shanghai'),
+    text: textModel(env),
   };
+}
+
+function textModel(env: NodeJS.ProcessEnv): Config['text'] {
+  const raw = env.TEXT_UPSTREAM_URL?.trim();
+  if (!raw) return undefined;
+  const url = new URL(raw);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && url.hostname === '127.0.0.1'))
+    throw new Error('TEXT_UPSTREAM_URL must use https:// (http:// is allowed only for 127.0.0.1 tests).');
+  return { url: url.toString().replace(/\/+$/, ''), key: text(env, 'TEXT_UPSTREAM_KEY'), model: text(env, 'TEXT_MODEL', 'gpt-6-luna') };
 }

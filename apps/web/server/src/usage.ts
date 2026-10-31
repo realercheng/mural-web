@@ -18,7 +18,7 @@ interface UsageFile {
   sessions: SessionUsage[];
 }
 
-export interface Limits { maxSessionSeconds: number; dailyLimitSeconds: number; totalLimitSeconds: number }
+export interface Limits { maxSessionSeconds: number; dailyLimitSeconds: number; monthlyLimitSeconds: number; totalLimitSeconds: number }
 
 /** Durable voice-time ledger. Holds no audio, transcripts or credentials. */
 export class UsageStore {
@@ -43,10 +43,14 @@ export class UsageStore {
   }
 
   summary(limits: Limits) {
-    const today = this.data.days[this.day()] ?? 0;
-    const remaining = Math.max(0, Math.min(limits.dailyLimitSeconds - today, limits.totalLimitSeconds - this.data.totalSeconds));
+    const day = this.day(), today = this.data.days[day] ?? 0;
+    // Day keys are YYYY-MM-DD in the ledger's time zone, so a month is the sum of its days.
+    const month = Object.entries(this.data.days).reduce((sum, [key, value]) => key.startsWith(day.slice(0, 8)) ? sum + value : sum, 0);
+    const remaining = Math.max(0, Math.min(limits.dailyLimitSeconds - today, limits.monthlyLimitSeconds - month,
+                                           limits.totalLimitSeconds - this.data.totalSeconds));
     return {
       todaySeconds: Math.round(today),
+      monthSeconds: Math.round(month),
       totalSeconds: Math.round(this.data.totalSeconds),
       remainingSeconds: Math.floor(remaining),
       nextSessionSeconds: Math.floor(Math.min(limits.maxSessionSeconds, remaining)),

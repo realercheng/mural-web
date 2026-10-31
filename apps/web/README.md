@@ -1,6 +1,6 @@
 # Mural Web voice prototype
 
-A personal, single-user Progressive Web App that tests live voice conversation in mobile browsers. It is a prototype: one free conversation in English or Spanish, live transcripts, no saved history, no subtitles, word lookup or assessment.
+A personal, single-user Progressive Web App that tests live voice conversation in mobile browsers. It is a prototype with two entries: a free adult conversation in English or Spanish, and a kid English speaking mode for Grade 3 and Grade 5 children. There are no subtitles, word lookup or assessment yet.
 
 ## How it works
 
@@ -13,10 +13,18 @@ Browser (PWA) ──cookie + mu-law speech over WebSocket──> gateway (server
 - The gateway signs in one user with an access code and an HttpOnly cookie. It alone holds the provider key, sends `session.start` with fixed model, voice and instructions, and forwards only `session.input_audio.append` and `session.close` from the browser.
 - Instructions port `TeachingPolicy.voice` and `TeachingPolicy.greeting` for a free conversation. `server/src/languages.ts` is generated from the English and Spanish Swift modules.
 - Client delegations receive the module's fixed "couldn't check that" reply; there is no lookup backend yet.
-- One conversation runs at a time. Each ends at the earliest of `MAX_SESSION_SECONDS`, the daily and total limits, `IDLE_AUDIO_SECONDS` without speech or heartbeat from the page, or the learner's request. The end-of-call log records traffic in each direction and the largest backlog waiting for the browser. Provider-reported seconds are recorded in `DATA_DIR/usage.json`; a session closed without a final provider event is counted with its connected wall-clock time.
+- One conversation runs at a time. Each ends at the earliest of `MAX_SESSION_SECONDS`, the daily, monthly and total limits, the time the page asked for, `IDLE_AUDIO_SECONDS` without speech or heartbeat from the page, or the learner's request. The end-of-call log records traffic in each direction and the largest backlog waiting for the browser. Provider-reported seconds are recorded in `DATA_DIR/usage.json`; a session closed without a final provider event is counted with its connected wall-clock time.
 - Logs contain event names, durations and fixed reasons only, never audio, transcripts, cookies or keys.
 
-The upstream is any endpoint that speaks the GPT-Live WebSocket protocol (`/v1/live/sessions`), such as Azure OpenAI or a gateway in front of it. Use a credential limited to the live model.
+## Kid speaking mode
+
+- `server/src/kids.ts` holds 23 topics in three groups (daily life, beyond school, news) and the kid instructions. Topics are not tied to a textbook or school grade. A difficulty level from 1 to 4, set per child by a parent, decides sentence length (3–6, 8, 10 or 12 words) and question style, so the same topic grows with the child.
+- The instructions ask for slow speech, one question per turn, "say, fix, repeat, reuse" correction with at most two repeats, one short Chinese hint when the learner is stuck, games, an opening review of up to three words from the last report, a closing "teach Mural a word" and privacy rules. They include today's date for the "this month" topic. The news topics let the child tell news they heard; Mural has no news source and is told not to add facts.
+- Azure's content filter stopped sessions when the instructions put a child's age next to lists of personal details or unsuitable themes. The wording is now neutral ("learner", no ages). After any change to the kid instructions, start each topic once with real GPT-Live before deploying.
+- The page opens `/api/live?language=en&mode=kid&scenario=<id>&level=<1-4>` with an optional nickname, review words and `seconds`. The server accepts only known topic IDs and levels, a nickname of letters and digits, and plain English review words, so none of them can carry instructions.
+- When the child taps "说再见", or a minute before the time limit, the gateway asks Mural to wrap up; the call ends a minute later.
+- For kid conversations only, the gateway keeps the transcript in memory. After the call the page posts the session ID to `/api/kid/report`; the gateway sends the transcript once to the text model (`TEXT_UPSTREAM_URL`, OpenAI Responses API with a JSON schema) and returns a Chinese parent report: words, sentences, corrections, successful repeats, the taught word and suggestions, including whether to change the level. The transcript is dropped once the report succeeds or after 30 minutes and is never written to disk. Without `TEXT_UPSTREAM_URL`, reports and stars are off.
+- The browser keeps profiles (nickname and level), stars, stickers (one per five stars), reports and each child's daily minutes in `localStorage`. A parent password, stored as a PBKDF2 hash, protects profiles, levels, daily minutes and reports. The per-child limit is enforced by the page; the server's daily and monthly limits still apply.
 
 ## Run locally
 
@@ -42,3 +50,5 @@ Microphone access needs HTTPS, or `localhost` on the same machine. `npm run dev`
 - Mobile browsers can suspend or mute the microphone when the screen locks or the page moves to the background. The gateway then ends the conversation after `IDLE_AUDIO_SECONDS`. Native background audio is not available to web apps.
 - Echo cancellation with speaker output depends on the browser and needs real-device checks.
 - The usage ledger is a cost guard for one person, not a billing record. Check the provider's own usage reports.
+- Kid-mode records live in one browser on one device. Clearing site data deletes them, and they do not sync between devices.
+- Stars and reports depend on speech recognition of a child's voice and on the text model's reading of it; both can be wrong.
