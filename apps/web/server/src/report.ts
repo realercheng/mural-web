@@ -60,6 +60,7 @@ const SCHEMA = {
 const INSTRUCTIONS = [
   'You write a short report for a Chinese parent about one English speaking practice between their primary-school child and Mural, an AI speaking partner.',
   'The transcript comes from speech recognition. The child\'s lines can contain recognition mistakes; do not count a likely recognition mistake as the child\'s error. Base every item only on the transcript; never invent words, errors or praise.',
+  'List in corrections only real errors. If Mural treated a correct sentence as an error, do not list it.',
   'Count repeatSuccesses only when Mural asked the child to say or repeat a sentence and the child\'s next line says it correctly or nearly correctly. A turn with no child line counts as nothing.',
   'If the difficulty level looks clearly too easy or too hard for the child, say so in one nextSteps item and suggest the level to use.',
   'Write summary, note and nextSteps in simple, natural Chinese for a parent. Keep English items exactly as practised. Do not include any personal information the child may have mentioned.',
