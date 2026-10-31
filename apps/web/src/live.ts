@@ -135,7 +135,7 @@ export function useLive(refresh: () => void) {
           break;
         case 'mural.ended':
           note(`对话结束：${REASONS[data.reason] ?? data.reason}，计时 ${minutes(data.seconds)}${data.confirmed ? '' : '（按连接时长估算）'}`);
-          note(`网络：下行 ${data.traffic?.toClientKB ?? '?'} KB，上行 ${data.traffic?.fromClientKB ?? '?'} KB，服务器待发积压最多 ${data.traffic?.maxBufferedKB ?? '?'} KB，本机播放积压最多 ${maxBacklog.toFixed(1)} 秒，断流 ${audio.underruns} 次，缓冲 ${audio.jitterBuffer.toFixed(2)} 秒`);
+          note(`网络：下行 ${data.traffic?.toClientKB ?? '?'} KB，上行 ${data.traffic?.fromClientKB ?? '?'} KB，服务器待发积压最多 ${data.traffic?.maxBufferedKB ?? '?'} KB，本机播放积压最多 ${maxBacklog.toFixed(1)} 秒，断流 ${audio.clock.underruns} 次，追回延迟 ${audio.clock.catchUps} 次，缓冲 ${audio.clock.jitterBuffer.toFixed(2)} 秒`);
           if (!EXPECTED.has(data.reason)) setMessage(current => current || `对话已结束：${REASONS[data.reason] ?? data.reason}`);
           onEnded?.({ sessionID, reason: data.reason, seconds: data.seconds, confirmed: data.confirmed });
           break;
