@@ -1,4 +1,6 @@
+import { cleanLevel, cleanNickname, cleanReviewWords, KID_WRAP_UP, kidGreeting, kidInstructions, kidScenario, type Level } from './kids.js';
 import { LANGUAGES, type LanguageContent } from './languages.js';
+import type { LivePlan } from './live.js';
 
 // Ports TeachingPolicy.voice and TeachingPolicy.greeting for a free conversation
 // without learner history, themes or subtitles. Keep wording aligned with Swift.
@@ -29,4 +31,23 @@ export function greeting(module: LanguageContent): string {
 
 export function publicLanguages() {
   return Object.values(LANGUAGES).map(({ id, name, nativeName }) => ({ id, name, nativeName }));
+}
+
+/**
+ * Chooses the conversation from the browser's query: a free adult conversation in any module,
+ * or an English kid scenario. Returns an error code for anything unknown.
+ */
+export function livePlan(query: URLSearchParams): { plan: LivePlan; kid?: { scenario: string; level: Level } } | { error: string } {
+  const module = language(query.get('language') ?? '');
+  if (!module) return { error: 'invalid_language' };
+  if (query.get('mode') !== 'kid')
+    return { plan: { module, mode: 'adult', instructions: voiceInstructions(module), greeting: greeting(module), keepTranscript: false } };
+  const scenario = kidScenario(query.get('scenario') ?? ''), level = cleanLevel(query.get('level') ?? '1');
+  if (module.id !== 'en' || !scenario || !level) return { error: 'invalid_scenario' };
+  const nickname = cleanNickname(query.get('nickname')), review = cleanReviewWords(query.get('review'));
+  return {
+    kid: { scenario: scenario.id, level },
+    plan: { module, mode: 'kid', instructions: kidInstructions(scenario, level, nickname, review), greeting: kidGreeting(scenario, nickname, review),
+            wrapUp: KID_WRAP_UP, keepTranscript: true },
+  };
 }

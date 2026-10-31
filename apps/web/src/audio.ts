@@ -1,4 +1,5 @@
 import { decodeMulaw } from '../server/src/wire';
+import { PlaybackClock } from './playback';
 
 const OUTPUT_RATE = 24_000;
 
@@ -10,12 +11,7 @@ export class AudioEngine {
   private stream?: MediaStream;
   private capture?: AudioWorkletNode;
   private analyser?: AnalyserNode;
-  private nextPlayback = 0;
-  // Context time of provider offset 0. Speech is played on the provider's timeline plus a
-  // jitter buffer, which grows each time the network delivers speech after its slot.
-  private anchor?: number;
-  jitterBuffer = 0.25;
-  underruns = 0;
+  clock = new PlaybackClock();
   private sources = new Set<AudioBufferSourceNode>();
   private samples = new Float32Array(1024);
 
@@ -48,7 +44,7 @@ export class AudioEngine {
   mute(muted: boolean): void { this.capture?.port.postMessage({ muted }); }
 
   /** Seconds of received speech still waiting to play; growth means the network is behind. */
-  get backlog(): number { return this.context ? Math.max(0, this.nextPlayback - this.context.currentTime) : 0; }
+  get backlog(): number { return this.context ? this.clock.backlog(this.context.currentTime) : 0; }
 
   play(mulaw: Uint8Array, offsetSamples: number): void {
     const context = this.context, analyser = this.analyser;
@@ -61,16 +57,7 @@ export class AudioEngine {
     const source = context.createBufferSource();
     source.buffer = buffer;
     source.connect(analyser);
-    const position = offsetSamples / OUTPUT_RATE, now = context.currentTime;
-    if (this.anchor === undefined) this.anchor = now + this.jitterBuffer - position;
-    else if (this.anchor + position < now + 0.02) {
-      this.underruns++;
-      this.jitterBuffer = Math.min(0.8, this.jitterBuffer + 0.1);
-      this.anchor = now + this.jitterBuffer - position;
-    }
-    const at = this.anchor + position;
-    source.start(at);
-    this.nextPlayback = Math.max(this.nextPlayback, at + buffer.duration);
+    source.start(this.clock.schedule(offsetSamples / OUTPUT_RATE, buffer.duration, context.currentTime));
     this.sources.add(source);
     source.onended = () => this.sources.delete(source);
   }
@@ -90,7 +77,7 @@ export class AudioEngine {
     this.capture?.disconnect();
     await this.context?.close().catch(() => {});
     this.context = undefined; this.stream = undefined; this.capture = undefined; this.analyser = undefined;
-    this.nextPlayback = 0; this.inputLevel = 0; this.anchor = undefined; this.jitterBuffer = 0.25; this.underruns = 0;
+    this.inputLevel = 0; this.clock = new PlaybackClock();
   }
 }
 
