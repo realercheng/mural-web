@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import WebSocket, { WebSocketServer } from 'ws';
 import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { cleanNickname, cleanReviewWords, KID_SCENARIOS, kidInstructions, kidScenario } from '../src/kids.js';
+import { cleanLevel, cleanNickname, cleanReviewWords, KID_SCENARIOS, kidInstructions, kidScenario } from '../src/kids.js';
 import { livePlan } from '../src/policy.js';
 import { UsageStore } from '../src/usage.js';
 
@@ -93,31 +93,36 @@ const requestReport = (sessionID: string) => fetch(`http://${base}/api/kid/repor
   method: 'POST', headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionID }),
 });
 
-test('each grade has six to eight general-topic scenarios', () => {
-  for (const grade of [3, 5]) {
-    const scenarios = KID_SCENARIOS.filter(item => item.grade === grade);
-    assert.ok(scenarios.length >= 6 && scenarios.length <= 8, `grade ${grade}: ${scenarios.length}`);
-    assert.ok(scenarios.every(item => !item.aligned && item.minutes >= 5 && item.minutes <= 10));
-  }
+test('topics cover daily life, beyond school and news, and none is tied to a level', () => {
+  for (const category of ['daily', 'explore', 'news'] as const)
+    assert.ok(KID_SCENARIOS.filter(item => item.category === category).length >= 3, category);
+  assert.ok(KID_SCENARIOS.every(item => item.minutes >= 5 && item.minutes <= 10 && !('grade' in item)));
   assert.equal(new Set(KID_SCENARIOS.map(item => item.id)).size, KID_SCENARIOS.length);
 });
 
-test('kid instructions follow the grade, review words and safety rules', () => {
-  const grade3 = kidInstructions(kidScenario('g3-colours')!, 'Xiaoyu', ['cat', 'dog']);
-  assert.match(grade3, /Grade 3/);
-  assert.match(grade3, /3 to 6 words/);
-  assert.match(grade3, /at most one question per turn/);
-  assert.match(grade3, /nickname is "Xiaoyu"/);
-  assert.match(grade3, /review of words from last time: cat, dog/);
-  assert.match(grade3, /ONE short hint in simple Mandarin Chinese/);
-  assert.match(grade3, /at most two times/);
-  assert.match(grade3, /never ask for or repeat personal information/);
-  assert.match(grade3, /talk to a parent or teacher/);
-  assert.match(grade3, /I spy/);
-  const grade5 = kidInstructions(kidScenario('g5-room')!);
-  assert.match(grade5, /at most 10 words/);
-  assert.match(grade5, /no earlier lesson to review/);
-  assert.doesNotMatch(grade5, /nickname/);
+test('kid instructions follow the level, review words and safety rules', () => {
+  const now = new Date('2026-10-31T04:00:00Z');
+  const starter = kidInstructions(kidScenario('colours')!, 1, 'Xiaoyu', ['cat', 'dog'], now);
+  assert.match(starter, /Level 1/);
+  assert.match(starter, /3 to 6 words/);
+  assert.match(starter, /at most one question per turn/);
+  assert.match(starter, /Call the learner "Xiaoyu"/);
+  assert.match(starter, /review of words from last time: cat, dog/);
+  assert.match(starter, /ONE short hint in simple Mandarin Chinese/);
+  assert.match(starter, /at most two times/);
+  assert.match(starter, /private details/);
+  assert.match(starter, /talk with a parent or teacher/);
+  assert.match(starter, /I spy/);
+  assert.match(starter, /Today is Saturday,? 31 October 2026/);
+  // Ages next to lists of personal details tripped Azure's content filter; keep them out.
+  assert.doesNotMatch(starter, /years old|child/i);
+  const upper = kidInstructions(kidScenario('reporter')!, 4);
+  assert.match(upper, /at most 12 words/);
+  assert.match(upper, /one easy, fun question/);
+  assert.match(upper, /does not add facts of its own/);
+  assert.doesNotMatch(upper, /Call the learner/);
+  assert.equal(cleanLevel('3'), 3);
+  assert.equal(cleanLevel('5'), undefined);
 });
 
 test('nicknames and review words cannot carry instructions', () => {
@@ -130,10 +135,11 @@ test('nicknames and review words cannot carry instructions', () => {
 test('the plan chooses adult or kid mode and rejects unknown scenarios', () => {
   const adult = livePlan(new URLSearchParams('language=es'));
   assert.ok('plan' in adult && adult.plan.mode === 'adult' && !adult.plan.keepTranscript);
-  const kid = livePlan(new URLSearchParams('language=en&mode=kid&scenario=g3-animals&nickname=Tom&review=cat'));
+  const kid = livePlan(new URLSearchParams('language=en&mode=kid&scenario=animals&level=2&nickname=Tom&review=cat'));
   assert.ok('plan' in kid && kid.plan.mode === 'kid' && kid.plan.keepTranscript && kid.plan.wrapUp);
-  assert.deepEqual(livePlan(new URLSearchParams('language=es&mode=kid&scenario=g3-animals')), { error: 'invalid_scenario' });
+  assert.deepEqual(livePlan(new URLSearchParams('language=es&mode=kid&scenario=animals')), { error: 'invalid_scenario' });
   assert.deepEqual(livePlan(new URLSearchParams('language=en&mode=kid&scenario=g9-space')), { error: 'invalid_scenario' });
+  assert.deepEqual(livePlan(new URLSearchParams('language=en&mode=kid&scenario=animals&level=7')), { error: 'invalid_scenario' });
 });
 
 test('the monthly limit counts calendar months in the usage time zone', () => {
@@ -161,14 +167,15 @@ test('a kid conversation uses kid instructions, honours the requested time and w
   liveEvents.length = 0; childSpeaks = true;
   const status = await (await fetch(`http://${base}/api/status`, { headers: { Cookie: cookie } })).json();
   assert.equal(status.kids.reports, true);
-  assert.ok(status.kids.scenarios.some((item: any) => item.id === 'g3-colours' && item.aligned === false));
+  assert.ok(status.kids.scenarios.some((item: any) => item.id === 'colours' && item.category === 'daily'));
+  assert.deepEqual(status.kids.levels.map((item: any) => item.level), [1, 2, 3, 4]);
   assert.equal(await rejection(connect('language=en&mode=kid&scenario=nope')), 400);
-  const socket = connect('language=en&mode=kid&scenario=g3-colours&nickname=Xiaoyu&review=cat,dog&seconds=45');
+  const socket = connect('language=en&mode=kid&scenario=colours&level=1&nickname=Xiaoyu&review=cat,dog&seconds=45');
   const session = await nextEvent(socket, 'mural.session');
   assert.equal(session.mode, 'kid');
   assert.equal(session.allowedSeconds, 45);
   const start = liveEvents.find(event => event.type === 'session.start')!;
-  assert.match(start.session.instructions, /Grade 3/);
+  assert.match(start.session.instructions, /Level 1/);
   assert.match(start.session.instructions, /cat, dog/);
   const greeting = liveEvents.find(event => event.type === 'session.instructions.append')!;
   assert.match(greeting.content, /Hi, Xiaoyu!/);
@@ -190,19 +197,20 @@ test('a kid conversation uses kid instructions, honours the requested time and w
   assert.equal(sent.authorization, 'Bearer sk-test-text');
   assert.equal(sent.body.model, 'gpt-6-luna');
   assert.equal(sent.body.text.format.type, 'json_schema');
+  assert.match(sent.body.input, /Difficulty level 1 of 4/);
   assert.match(sent.body.input, /Child: It red\.\nMural: Good try! It's red\. Your turn!\nChild: It's red\./);
   assert.equal((await requestReport(session.sessionID)).status, 404);
 });
 
 test('a conversation without child speech has no report, and the monthly limit stops new calls', async () => {
   childSpeaks = false;
-  const socket = connect('language=en&mode=kid&scenario=g5-day');
+  const socket = connect('language=en&mode=kid&scenario=day&level=3');
   const session = await nextEvent(socket, 'mural.session');
   socket.send(JSON.stringify({ type: 'session.close' }));
   await nextEvent(socket, 'mural.ended');
   assert.equal((await requestReport(session.sessionID)).status, 422);
   // Two calls of 12.5 seconds leave 35 of the 60 monthly seconds; a requested 20 seconds is below the 30-second minimum.
-  assert.equal(await rejection(connect('language=en&mode=kid&scenario=g5-day&seconds=20')), 429);
+  assert.equal(await rejection(connect('language=en&mode=kid&scenario=day&level=3&seconds=20')), 429);
   const adult = connect('language=en');
   await nextEvent(adult, 'mural.session');
   adult.send(JSON.stringify({ type: 'session.close' }));

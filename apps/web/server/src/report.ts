@@ -1,5 +1,5 @@
 import type { Config } from './config.js';
-import type { KidReport, KidScenario } from './kids.js';
+import { LEVELS, type KidReport, type KidScenario, type Level } from './kids.js';
 
 export interface TranscriptLine { speaker: 'child' | 'mural'; text: string }
 
@@ -12,15 +12,15 @@ const MAX_TRANSCRIPT_CHARS = 30_000;
  * 30 minutes.
  */
 export class PendingReports {
-  private readonly entries = new Map<string, { scenario: KidScenario; lines: TranscriptLine[]; expires: number }>();
+  private readonly entries = new Map<string, { scenario: KidScenario; level: Level; lines: TranscriptLine[]; expires: number }>();
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  keep(sessionID: string, scenario: KidScenario, lines: TranscriptLine[]): void {
+  keep(sessionID: string, scenario: KidScenario, level: Level, lines: TranscriptLine[]): void {
     const now = this.now();
     for (const [key, value] of this.entries) if (value.expires <= now) this.entries.delete(key);
     while (this.entries.size >= 10) this.entries.delete(this.entries.keys().next().value!);
-    this.entries.set(sessionID, { scenario, lines, expires: now + PENDING_MINUTES * 60_000 });
+    this.entries.set(sessionID, { scenario, level, lines, expires: now + PENDING_MINUTES * 60_000 });
   }
 
   get(sessionID: string) {
@@ -61,13 +61,14 @@ const INSTRUCTIONS = [
   'You write a short report for a Chinese parent about one English speaking practice between their primary-school child and Mural, an AI speaking partner.',
   'The transcript comes from speech recognition. The child\'s lines can contain recognition mistakes; do not count a likely recognition mistake as the child\'s error. Base every item only on the transcript; never invent words, errors or praise.',
   'Count repeatSuccesses only when Mural asked the child to say or repeat a sentence and the child\'s next line says it correctly or nearly correctly. A turn with no child line counts as nothing.',
+  'If the difficulty level looks clearly too easy or too hard for the child, say so in one nextSteps item and suggest the level to use.',
   'Write summary, note and nextSteps in simple, natural Chinese for a parent. Keep English items exactly as practised. Do not include any personal information the child may have mentioned.',
 ].join('\n');
 
 export class ReportUnavailable extends Error {}
 
 /** Asks the text model for a parent report. The transcript is sent once and not stored. */
-export async function writeReport(text: NonNullable<Config['text']>, scenario: KidScenario, lines: TranscriptLine[],
+export async function writeReport(text: NonNullable<Config['text']>, scenario: KidScenario, level: Level, lines: TranscriptLine[],
                                   fetcher: typeof fetch = fetch): Promise<KidReport> {
   let transcript = lines.map(line => `${line.speaker === 'child' ? 'Child' : 'Mural'}: ${line.text.trim()}`).join('\n');
   if (transcript.length > MAX_TRANSCRIPT_CHARS) transcript = transcript.slice(-MAX_TRANSCRIPT_CHARS);
@@ -77,7 +78,7 @@ export async function writeReport(text: NonNullable<Config['text']>, scenario: K
     signal: AbortSignal.timeout(90_000),
     body: JSON.stringify({
       model: text.model, instructions: INSTRUCTIONS, max_output_tokens: 4_000, reasoning: { effort: 'low' }, store: false,
-      input: `Grade ${scenario.grade}. Topic: ${scenario.titleEn} (${scenario.titleZh}). Target words: ${scenario.words.join(', ')}.\n\nTranscript:\n${transcript}`,
+      input: `Difficulty level ${level} of 4 (${LEVELS[level].nameZh}). Topic: ${scenario.titleEn} (${scenario.titleZh}). Target words: ${scenario.words.join(', ')}.\n\nTranscript:\n${transcript}`,
       text: { format: { type: 'json_schema', name: 'kid_report', strict: true, schema: SCHEMA } },
     }),
   });

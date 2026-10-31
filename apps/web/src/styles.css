@@ -64,7 +64,6 @@ header { text-align: center; }
 .card strong { font-size: 1.05rem; }
 .card.kid, .card.mode { align-items: center; text-align: center; }
 .avatar { font-size: 2.4rem; line-height: 1; }
-.badge { font-size: 0.7rem; background: var(--lilac); border-radius: 999px; padding: 0.1rem 0.5rem; }
 .stars-line { font-size: 1.4rem; margin: 0; }
 .sticker-book { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.6rem; width: 100%; }
 .sticker { display: grid; place-items: center; aspect-ratio: 1; font-size: 2rem; border-radius: 1rem; background: white; border: 1px dashed var(--peach); color: var(--secondary); }
@@ -84,3 +83,5 @@ header { text-align: center; }
 .report h2 { font-size: 1rem; margin: 1rem 0 0.3rem; }
 .report p, .report ul { margin: 0.2rem 0; }
 .report ul { padding-left: 1.2rem; }
+.tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
+.list-item.selected { background: var(--ink); color: var(--cream); border-color: var(--ink); }

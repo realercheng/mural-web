@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws';
 import { Auth, COOKIE_NAME } from './auth.js';
 import type { Config } from './config.js';
 import { LiveRelay } from './live.js';
-import { kidScenario, publicKidScenarios } from './kids.js';
+import { kidScenario, publicKidScenarios, publicLevels } from './kids.js';
 import { livePlan, publicLanguages } from './policy.js';
 import { PendingReports, writeReport } from './report.js';
 import { UsageStore } from './usage.js';
@@ -104,7 +104,7 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
       if (path === '/api/status' && request.method === 'GET') {
         if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
         send(response, 200, { usage: usage.summary(limits), active: Boolean(active), languages: publicLanguages(),
-                              kids: { scenarios: publicKidScenarios(), reports: Boolean(config.text) } });
+                              kids: { scenarios: publicKidScenarios(), levels: publicLevels(), reports: Boolean(config.text) } });
         return;
       }
       if (path === '/api/kid/report' && request.method === 'POST') {
@@ -121,7 +121,7 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
         if (reporting.has(id)) { fail(response, 409, 'report_in_progress'); return; }
         reporting.add(id);
         try {
-          const report = await writeReport(config.text, entry.scenario, entry.lines);
+          const report = await writeReport(config.text, entry.scenario, entry.level, entry.lines);
           pending.delete(id);
           log('kid_report_written', { session: id, scenario: entry.scenario.id });
           send(response, 200, { report });
@@ -162,8 +162,8 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
       if (active) { client.close(1013, 'session_active'); return; }
       const relay = new LiveRelay(client, chosen.plan, allowed, config, usage, log, transcript => {
         if (active === relay) active = undefined;
-        const scenario = kidScenario(chosen.scenario ?? '');
-        if (scenario && transcript.length) pending.keep(relay.id, scenario, transcript);
+        const scenario = kidScenario(chosen.kid?.scenario ?? '');
+        if (scenario && chosen.kid && transcript.length) pending.keep(relay.id, scenario, chosen.kid.level, transcript);
       });
       active = relay;
     });

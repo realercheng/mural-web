@@ -4,9 +4,12 @@ import { useCallback, useState } from 'react';
 import type { KidReport } from '../server/src/kids';
 
 export type { KidReport };
-export type Grade = 3 | 5;
-export interface Scenario { id: string; grade: Grade; titleZh: string; titleEn: string; minutes: number; aligned: boolean; gameZh: string }
-export interface Profile { id: string; nickname: string; grade: Grade; dailyMinutes: number; stars: number; createdAt: string }
+export type Level = 1 | 2 | 3 | 4;
+export interface LevelInfo { level: Level; nameZh: string; hintZh: string }
+export type Category = 'daily' | 'explore' | 'news';
+export interface Scenario { id: string; category: Category; titleZh: string; titleEn: string; minutes: number; gameZh: string }
+/** `level` is a difficulty a parent raises as the child grows; it is not a school grade. */
+export interface Profile { id: string; nickname: string; level: Level; dailyMinutes: number; stars: number; createdAt: string }
 export interface SavedReport {
   id: string; profileID: string; scenarioID: string; scenarioTitle: string; startedAt: string; seconds: number;
   stars: number; status: 'ok' | 'failed' | 'none'; report?: KidReport;
@@ -24,6 +27,7 @@ const KEY = 'mural.kids.v1';
 export const STARS_PER_STICKER = 5;
 export const MAX_STARS_PER_TALK = 10;
 export const STICKERS = ['🦁', '🐼', '🦄', '🚀', '🌈', '🍉', '🐬', '🦕', '🎈', '🐝', '🍦', '🐢', '🦋', '🌻', '🐧', '🎨', '🦊', '🍓', '🐳', '🏆'];
+export const AVATARS: Record<Level, string> = { 1: '🐣', 2: '🐥', 3: '🦉', 4: '🦅' };
 export const NICKNAME = /^[\p{L}\p{N} ]{1,12}$/u;
 
 export const today = (date = new Date()) =>
@@ -32,7 +36,13 @@ export const today = (date = new Date()) =>
 function load(): KidData {
   try {
     const data = JSON.parse(localStorage.getItem(KEY) ?? '') as KidData;
-    if (data?.version === 1 && Array.isArray(data.profiles)) return data;
+    if (data?.version !== 1 || !Array.isArray(data.profiles)) throw new Error('unsupported');
+    // The first test build stored a school grade (3 or 5); map it to a difficulty level.
+    data.profiles = data.profiles.map(profile => {
+      const { grade, ...rest } = profile as Profile & { grade?: number };
+      return rest.level ? rest : { ...rest, level: grade === 5 ? 3 : 1 };
+    });
+    return data;
   } catch { /* first use */ }
   return { version: 1, profiles: [], reports: [], usage: {} };
 }

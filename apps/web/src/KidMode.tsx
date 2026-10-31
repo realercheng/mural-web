@@ -1,22 +1,25 @@
 import { useState } from 'react';
 import { Conversation, Diagnostics, TopBar } from './common';
-import { MAX_STARS_PER_TALK, STARS_PER_STICKER, STICKERS, stickers, type Kids, type Profile, type SavedReport, type Scenario } from './kids';
+import { AVATARS, MAX_STARS_PER_TALK, STARS_PER_STICKER, STICKERS, stickers, type Category, type Kids, type LevelInfo, type Profile, type SavedReport, type Scenario } from './kids';
 import { minutes, type Ended, type Live } from './live';
 import { ParentArea } from './Parent';
 
 type View = 'profiles' | 'scenarios' | 'talk' | 'stickers' | 'parent';
 interface Result { status: 'writing' | 'ok' | 'none' | 'failed' | 'off'; saved?: SavedReport; newStickers: number; sessionID?: string }
 
-const avatar = (profile: Profile) => (profile.grade === 3 ? '🐣' : '🦉');
+const avatar = (profile: Profile) => AVATARS[profile.level];
+const CATEGORIES: { id: Category; nameZh: string }[] = [{ id: 'daily', nameZh: '日常生活' }, { id: 'explore', nameZh: '校外拓展' }, { id: 'news', nameZh: '新闻话题' }];
 const MINIMUM_SECONDS = 30;
 
-export function KidMode({ live, kids, scenarios, reportsEnabled, serverUsage, onExit }: {
-  live: Live; kids: Kids; scenarios: Scenario[]; reportsEnabled: boolean; serverUsage: React.ReactNode; onExit: () => void;
+export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverUsage, onExit }: {
+  live: Live; kids: Kids; scenarios: Scenario[]; levels: LevelInfo[]; reportsEnabled: boolean; serverUsage: React.ReactNode; onExit: () => void;
 }) {
   const [view, setView] = useState<View>('profiles');
   const [profileID, setProfileID] = useState<string>();
   const [scenario, setScenario] = useState<Scenario>();
   const [result, setResult] = useState<Result>();
+  const [category, setCategory] = useState<Category>('daily');
+  const levelName = (profile: Profile) => `难度 ${profile.level} ${levels.find(item => item.level === profile.level)?.nameZh ?? ''}`;
   const profile = kids.profiles.find(item => item.id === profileID);
 
   const writeReport = async (current: Profile, item: Scenario, ended: Ended, recordID: string) => {
@@ -51,7 +54,7 @@ export function KidMode({ live, kids, scenarios, reportsEnabled, serverUsage, on
     if (seconds < MINIMUM_SECONDS) { live.setMessage('今天的练习时间用完了，明天再来吧！'); return; }
     setResult(undefined);
     const current = profile, item = scenario, recordID = crypto.randomUUID();
-    live.start({ language: 'en', mode: 'kid', scenario: item.id, nickname: current.nickname,
+    live.start({ language: 'en', mode: 'kid', scenario: item.id, level: String(current.level), nickname: current.nickname,
                  review: kids.lastReviewWords(current.id).join(','), seconds: String(seconds) }, ended => {
       kids.addUsage(current.id, ended.seconds);
       if (ended.seconds > 0) writeReport(current, item, ended, recordID);
@@ -63,7 +66,7 @@ export function KidMode({ live, kids, scenarios, reportsEnabled, serverUsage, on
     writeReport(profile, scenario, { sessionID: result.sessionID, reason: 'retry', seconds: result.saved.seconds, confirmed: true }, result.saved.id);
   };
 
-  if (view === 'parent') return <ParentArea kids={kids} scenarios={scenarios} serverUsage={serverUsage} onBack={() => setView('profiles')} />;
+  if (view === 'parent') return <ParentArea kids={kids} levels={levels} serverUsage={serverUsage} onBack={() => setView('profiles')} />;
 
   if (view === 'profiles' || !profile) return (
     <main className="screen">
@@ -74,7 +77,7 @@ export function KidMode({ live, kids, scenarios, reportsEnabled, serverUsage, on
           <button key={item.id} className="card kid" onClick={() => { setProfileID(item.id); setView('scenarios'); }}>
             <span className="avatar">{avatar(item)}</span>
             <strong>{item.nickname}</strong>
-            <span className="muted">{item.grade === 3 ? '三年级' : '五年级'} · ⭐ {item.stars}</span>
+            <span className="muted">{levelName(item)} · ⭐ {item.stars}</span>
             <span className="small muted">今天还可以练 {Math.floor(kids.remainingToday(item) / 60)} 分钟</span>
           </button>
         ))}
@@ -104,14 +107,20 @@ export function KidMode({ live, kids, scenarios, reportsEnabled, serverUsage, on
       <TopBar title={`${avatar(profile)} ${profile.nickname}`} onBack={() => setView('profiles')}>
         <button className="chip" onClick={() => setView('stickers')}>⭐ {profile.stars} · 贴纸 {owned.length}</button>
       </TopBar>
-      <p className="muted">今天还可以练 {minutes(kids.remainingToday(profile))}。选一个场景开始：</p>
+      <p className="muted">{levelName(profile)} · 今天还可以练 {minutes(kids.remainingToday(profile))}</p>
+      <div className="tabs" role="tablist">
+        {CATEGORIES.map(item => (
+          <button key={item.id} role="tab" aria-selected={category === item.id} className={category === item.id ? 'chip selected' : 'chip'}
+                  onClick={() => setCategory(item.id)}>{item.nameZh}</button>
+        ))}
+      </div>
+      {category === 'news' && <p className="small muted center-text">Mural 不会上网查新闻。请孩子讲自己听到的新闻，Mural 帮孩子用英语说出来。</p>}
       <div className="cards">
-        {scenarios.filter(item => item.grade === profile.grade).map(item => (
+        {scenarios.filter(item => item.category === category).map(item => (
           <button key={item.id} className="card scenario" onClick={() => { setScenario(item); setResult(undefined); live.setMessage(''); setView('talk'); }}>
             <strong>{item.titleZh}</strong>
             <span className="muted">{item.titleEn}</span>
             <span className="small">🎲 {item.gameZh} · 约 {item.minutes} 分钟</span>
-            {!item.aligned && <span className="badge">通用主题</span>}
           </button>
         ))}
       </div>
@@ -124,7 +133,7 @@ export function KidMode({ live, kids, scenarios, reportsEnabled, serverUsage, on
       <TopBar title={scenario.titleZh} onBack={live.busy ? undefined : () => setView('scenarios')}>
         <span className="muted">⭐ {profile.stars}</span>
       </TopBar>
-      <p className="muted">{scenario.titleEn} · 🎲 {scenario.gameZh}{scenario.aligned ? '' : ' · 通用主题'}</p>
+      <p className="muted">{scenario.titleEn} · 🎲 {scenario.gameZh} · {levelName(profile)}</p>
       {result && !live.busy ? <ResultPanel result={result} profile={profile} onRetry={retry} onAgain={() => setView('scenarios')} /> : (
         <Conversation live={live} idleLabel="开始" stopLabel={stopLabel} onStart={start} onStop={live.wrapping ? live.end : live.wrapUp}
                       disabled={kids.remainingToday(profile) < MINIMUM_SECONDS}

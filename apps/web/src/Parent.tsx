@@ -1,20 +1,20 @@
 import { useState } from 'react';
 import { TopBar } from './common';
-import { NICKNAME, type Grade, type Kids, type Profile, type SavedReport, type Scenario } from './kids';
+import { NICKNAME, type Kids, type Level, type LevelInfo, type Profile, type SavedReport } from './kids';
 import { minutes } from './live';
 
 type View = { name: 'list' } | { name: 'edit'; profile?: Profile } | { name: 'reports'; profile: Profile }
   | { name: 'report'; profile: Profile; saved: SavedReport } | { name: 'password' };
 
 /** Parent settings behind a device-local password: profiles, per-child daily minutes and reports. */
-export function ParentArea({ kids, scenarios, serverUsage, onBack }: { kids: Kids; scenarios: Scenario[]; serverUsage: React.ReactNode; onBack: () => void }) {
+export function ParentArea({ kids, levels, serverUsage, onBack }: { kids: Kids; levels: LevelInfo[]; serverUsage: React.ReactNode; onBack: () => void }) {
   const [unlocked, setUnlocked] = useState(false);
   const [view, setView] = useState<View>({ name: 'list' });
 
   if (!unlocked) return <Lock kids={kids} onUnlock={() => setUnlocked(true)} onBack={onBack} />;
   const toList = () => setView({ name: 'list' });
 
-  if (view.name === 'edit') return <ProfileForm kids={kids} profile={view.profile} onDone={toList} />;
+  if (view.name === 'edit') return <ProfileForm kids={kids} levels={levels} profile={view.profile} onDone={toList} />;
   if (view.name === 'password') return (
     <main className="screen">
       <TopBar title="修改家长密码" onBack={toList} />
@@ -46,7 +46,7 @@ export function ParentArea({ kids, scenarios, serverUsage, onBack }: { kids: Kid
       <div className="list">
         {kids.profiles.map(profile => (
           <div key={profile.id} className="list-item static">
-            <strong>{profile.nickname} · {profile.grade === 3 ? '三年级' : '五年级'}</strong>
+            <strong>{profile.nickname} · 难度 {profile.level} {levels.find(item => item.level === profile.level)?.nameZh}</strong>
             <span className="muted small">每天上限 {profile.dailyMinutes} 分钟，今天已用 {minutes(kids.usedToday(profile.id))}，共 ⭐ {profile.stars}</span>
             <span className="row">
               <button className="secondary" onClick={() => setView({ name: 'reports', profile })}>查看报告</button>
@@ -58,7 +58,7 @@ export function ParentArea({ kids, scenarios, serverUsage, onBack }: { kids: Kid
       <button className="primary" onClick={() => setView({ name: 'edit' })}>添加孩子</button>
       <div className="note small muted">
         <p>{serverUsage}</p>
-        <p>场景共 {scenarios.length} 个，目前是通用主题，还没有对齐外研版课本单元。</p>
+        <p>话题不和课本绑定。孩子进步后，点“编辑”调高难度即可。</p>
         <p>档案、星星和报告只保存在这台设备的浏览器里。清除浏览器数据会删除它们。</p>
       </div>
       <button className="secondary" onClick={() => setView({ name: 'password' })}>修改家长密码</button>
@@ -106,9 +106,9 @@ function PasswordForm({ label, confirm = true, onSubmit }: { label: string; conf
   );
 }
 
-function ProfileForm({ kids, profile, onDone }: { kids: Kids; profile?: Profile; onDone: () => void }) {
+function ProfileForm({ kids, levels, profile, onDone }: { kids: Kids; levels: LevelInfo[]; profile?: Profile; onDone: () => void }) {
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
-  const [grade, setGrade] = useState<Grade>(profile?.grade ?? 3);
+  const [level, setLevel] = useState<Level>(profile?.level ?? 1);
   const [dailyMinutes, setDailyMinutes] = useState(profile?.dailyMinutes ?? 30);
   const valid = NICKNAME.test(nickname.trim());
   return (
@@ -117,18 +117,21 @@ function ProfileForm({ kids, profile, onDone }: { kids: Kids; profile?: Profile;
       <form className="form" onSubmit={event => {
         event.preventDefault();
         if (!valid) return;
-        kids.saveProfile({ id: profile?.id ?? crypto.randomUUID(), nickname: nickname.trim(), grade, dailyMinutes,
+        kids.saveProfile({ id: profile?.id ?? crypto.randomUUID(), nickname: nickname.trim(), level, dailyMinutes,
                            stars: profile?.stars ?? 0, createdAt: profile?.createdAt ?? new Date().toISOString() });
         onDone();
       }}>
         <label htmlFor="nickname">昵称（不要填真实姓名）</label>
         <input id="nickname" value={nickname} maxLength={12} onChange={event => setNickname(event.target.value)} placeholder="例如 Lucky、小雨" />
         {nickname && !valid && <p className="error small">昵称只能用文字、字母和数字，最多 12 个字。</p>}
-        <span className="label">年级</span>
-        <div className="row" role="radiogroup" aria-label="年级">
-          {([3, 5] as const).map(value => (
-            <button key={value} type="button" role="radio" aria-checked={grade === value} className={grade === value ? 'chip selected' : 'chip'}
-                    onClick={() => setGrade(value)}>{value === 3 ? '三年级' : '五年级'}</button>
+        <span className="label">难度（随时可以改）</span>
+        <div className="list" role="radiogroup" aria-label="难度">
+          {levels.map(item => (
+            <button key={item.level} type="button" role="radio" aria-checked={level === item.level}
+                    className={level === item.level ? 'list-item selected' : 'list-item'} onClick={() => setLevel(item.level)}>
+              <strong>难度 {item.level} {item.nameZh}</strong>
+              <span className="small">{item.hintZh}</span>
+            </button>
           ))}
         </div>
         <label htmlFor="daily">每天最多练习 {dailyMinutes} 分钟</label>

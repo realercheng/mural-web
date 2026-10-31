@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 import { Conversation, Diagnostics, TopBar } from './common';
 import { KidMode } from './KidMode';
-import { useKids, type Scenario } from './kids';
+import { useKids, type LevelInfo, type Scenario } from './kids';
 import { minutes, useLive } from './live';
 
 interface Usage { todaySeconds: number; monthSeconds: number; totalSeconds: number; remainingSeconds: number; nextSessionSeconds: number }
@@ -15,6 +15,7 @@ export function App() {
   const [usage, setUsage] = useState<Usage>();
   const [languages, setLanguages] = useState<Language[]>([]);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [levels, setLevels] = useState<LevelInfo[]>([]);
   const [reportsEnabled, setReportsEnabled] = useState(false);
   const [languageID, setLanguageID] = useState(() => localStorage.getItem('mural.language') ?? 'en');
   // A device used by a child reopens in kid mode.
@@ -29,7 +30,7 @@ export function App() {
     if (response.status === 401) { setPhase('signin'); return; }
     const body = await response.json();
     setUsage(body.usage); setLanguages(body.languages);
-    setScenarios(body.kids?.scenarios ?? []); setReportsEnabled(Boolean(body.kids?.reports));
+    setScenarios(body.kids?.scenarios ?? []); setLevels(body.kids?.levels ?? []); setReportsEnabled(Boolean(body.kids?.reports));
     setPhase('ready');
   }, []);
   const live = useLive(useCallback(() => { refresh().catch(() => {}); }, [refresh]));
@@ -68,7 +69,7 @@ export function App() {
   if (mode === 'kid') return (
     <>
       {update}
-      <KidMode live={live} kids={kids} scenarios={scenarios} reportsEnabled={reportsEnabled} serverUsage={serverUsage} onExit={() => choose('home')} />
+      <KidMode live={live} kids={kids} scenarios={scenarios} levels={levels} reportsEnabled={reportsEnabled} serverUsage={serverUsage} onExit={() => choose('home')} />
     </>
   );
 
@@ -103,7 +104,7 @@ export function App() {
         <button className="card mode" onClick={() => choose('kid')}>
           <span className="avatar">🧒</span>
           <strong>孩子英语口语</strong>
-          <span className="muted small">三年级 / 五年级场景、跟读得星星、家长报告</span>
+          <span className="muted small">分难度练口语、跟读得星星、家长报告</span>
         </button>
         <button className="card mode" onClick={() => choose('adult')}>
           <span className="avatar">💬</span>
