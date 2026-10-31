@@ -6,7 +6,8 @@ import { Auth, COOKIE_NAME } from './auth.js';
 import type { Config } from './config.js';
 import { LiveRelay } from './live.js';
 import { kidScenario, publicKidScenarios, publicLevels } from './kids.js';
-import { livePlan, publicLanguages } from './policy.js';
+import { cleanText, HelperLimited, TextHelpers } from './helpers.js';
+import { language, livePlan, lookupInstructions, publicLanguages, translationInstructions } from './policy.js';
 import { PendingReports, writeReport } from './report.js';
 import { UsageStore } from './usage.js';
 
@@ -28,6 +29,7 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
   let active: LiveRelay | undefined;
   const pending = new PendingReports();
   const reporting = new Set<string>();
+  const helpers = config.text ? new TextHelpers(config.text, config.helperLimits, config.timeZone) : undefined;
   const secure = config.publicOrigins.every(origin => origin.startsWith('https:'));
   const wsOrigins = config.publicOrigins.map(origin => origin.replace(/^http/, 'ws')).join(' ');
   const csp = `default-src 'self'; connect-src 'self' ${wsOrigins}; img-src 'self' data:; style-src 'self'; script-src 'self'; ` +
@@ -46,11 +48,11 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
   const cookie = (value: string, maxAge: number) =>
     `${COOKIE_NAME}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`;
 
-  const readJSON = (request: IncomingMessage): Promise<unknown> => new Promise((resolve, reject) => {
+  const readJSON = (request: IncomingMessage, limit = 1_024): Promise<unknown> => new Promise((resolve, reject) => {
     let size = 0; const chunks: Buffer[] = [];
     request.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > 1_024) { reject(new Error('too_large')); request.destroy(); return; }
+      if (size > limit) { reject(new Error('too_large')); request.destroy(); return; }
       chunks.push(chunk);
     });
     request.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch { reject(new Error('invalid_json')); } });
@@ -104,7 +106,35 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
       if (path === '/api/status' && request.method === 'GET') {
         if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
         send(response, 200, { usage: usage.summary(limits), active: Boolean(active), languages: publicLanguages(),
-                              kids: { scenarios: publicKidScenarios(), levels: publicLevels(), reports: Boolean(config.text) } });
+                              kids: { scenarios: publicKidScenarios(), levels: publicLevels(), reports: Boolean(config.text) },
+                              helpers: helpers ? { remainingToday: helpers.remainingToday() } : null });
+        return;
+      }
+      if ((path === '/api/meaning' || path === '/api/lookup') && request.method === 'POST') {
+        if (!sameOrigin(request)) { fail(response, 403, 'origin_rejected'); return; }
+        if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
+        if (!helpers) { fail(response, 503, 'helpers_unavailable'); return; }
+        const body = await readJSON(request, 8_192) as { language?: unknown; text?: unknown; word?: unknown; sentence?: unknown };
+        const module = language(typeof body?.language === 'string' ? body.language : '');
+        if (!module) { fail(response, 400, 'invalid_language'); return; }
+        const purpose = path === '/api/meaning' ? 'meaning' as const : 'lookup' as const;
+        let instructions: string, input: string;
+        if (purpose === 'meaning') {
+          const text = cleanText(body?.text, 1_500);
+          if (!text) { fail(response, 400, 'invalid_text'); return; }
+          instructions = translationInstructions(module); input = text;
+        } else {
+          const word = cleanText(body?.word, 60), sentence = cleanText(body?.sentence, 1_500);
+          if (!word || !sentence) { fail(response, 400, 'invalid_text'); return; }
+          instructions = lookupInstructions(module); input = `Selected: ${word}\nSentence: ${sentence}`;
+        }
+        try {
+          send(response, 200, { text: await helpers.call(purpose, instructions, input) });
+        } catch (error) {
+          if (error instanceof HelperLimited) { fail(response, 429, 'helper_limited'); return; }
+          log('helper_failed', { purpose, category: error instanceof Error ? error.message.slice(0, 40) : 'unknown' });
+          fail(response, 502, 'helper_failed');
+        }
         return;
       }
       if (path === '/api/kid/report' && request.method === 'POST') {
@@ -164,7 +194,7 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
         if (active === relay) active = undefined;
         const scenario = kidScenario(chosen.kid?.scenario ?? '');
         if (scenario && chosen.kid && transcript.length) pending.keep(relay.id, scenario, chosen.kid.level, transcript);
-      });
+      }, helpers);
       active = relay;
     });
   });

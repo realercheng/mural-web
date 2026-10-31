@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRegisterSW } from 'virtual:pwa-register/react';
+import { withMeanings, createRecord } from './archive';
 import { Conversation, Diagnostics, TopBar } from './common';
+import { useHistory } from './history';
+import { HistoryView } from './HistoryView';
 import { KidMode } from './KidMode';
 import { useKids, type LevelInfo, type Scenario } from './kids';
-import { minutes, useLive } from './live';
+import { minutes, REASON_TEXT, useLive, type Ended } from './live';
+import { useMeanings, useSubtitlePreference } from './meaning';
 
 interface Usage { todaySeconds: number; monthSeconds: number; totalSeconds: number; remainingSeconds: number; nextSessionSeconds: number }
 interface Language { id: string; name: string; nativeName: string }
 type Phase = 'loading' | 'signin' | 'ready';
-type Mode = 'home' | 'adult' | 'kid';
+type Mode = 'home' | 'adult' | 'kid' | 'history';
 
 export function App() {
   const [phase, setPhase] = useState<Phase>('loading');
@@ -17,6 +21,7 @@ export function App() {
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [levels, setLevels] = useState<LevelInfo[]>([]);
   const [reportsEnabled, setReportsEnabled] = useState(false);
+  const [helpersEnabled, setHelpersEnabled] = useState(false);
   const [languageID, setLanguageID] = useState(() => localStorage.getItem('mural.language') ?? 'en');
   // A device used by a child reopens in kid mode.
   const [mode, setMode] = useState<Mode>(() => (localStorage.getItem('mural.mode') as Mode | null) ?? 'home');
@@ -24,6 +29,9 @@ export function App() {
   const [message, setMessage] = useState('');
   const { needRefresh: [needRefresh], updateServiceWorker } = useRegisterSW();
   const kids = useKids();
+  const history = useHistory();
+  const [subtitles, setSubtitles] = useSubtitlePreference();
+  const meanings = useMeanings(mode === 'kid' ? 'en' : languageID);
 
   const refresh = useCallback(async () => {
     const response = await fetch('/api/status', { cache: 'no-store' });
@@ -31,6 +39,7 @@ export function App() {
     const body = await response.json();
     setUsage(body.usage); setLanguages(body.languages);
     setScenarios(body.kids?.scenarios ?? []); setLevels(body.kids?.levels ?? []); setReportsEnabled(Boolean(body.kids?.reports));
+    setHelpersEnabled(Boolean(body.helpers));
     setPhase('ready');
   }, []);
   const live = useLive(useCallback(() => { refresh().catch(() => {}); }, [refresh]));
@@ -45,7 +54,24 @@ export function App() {
     setMessage(response.status === 429 ? '尝试次数过多，请 15 分钟后再试。' : '访问码不正确。');
   };
 
-  const choose = (next: Mode) => { setMode(next); localStorage.setItem('mural.mode', next); live.setMessage(''); };
+  const choose = (next: Mode) => { setMode(next); if (next !== 'history') localStorage.setItem('mural.mode', next); live.setMessage(''); };
+  const languageName = (id: string) => languages.find(item => item.id === id)?.nativeName ?? id;
+  const reading = { languageID: helpersEnabled ? (mode === 'kid' ? 'en' : languageID) : undefined, meanings: helpersEnabled ? meanings : undefined,
+                    subtitles: helpersEnabled && subtitles, onSubtitles: setSubtitles };
+
+  /** Saves a finished adult conversation, then again with the subtitles that arrive afterwards. */
+  const saveAdult = (id: string, ended: Ended) => {
+    if (!ended.lines.length) return;
+    const record = createRecord({ id, languageID, title: `${languageName(languageID)} 自由对话`, startedAt: ended.startedAt, seconds: ended.seconds,
+                                  confirmed: ended.confirmed, endReason: REASON_TEXT(ended.reason), lines: ended.lines, web: { mode: 'adult' } });
+    history.save(record);
+    if (!reading.meanings || !subtitles) return;
+    const mural = ended.lines.filter(line => line.speaker === 'assistant');
+    Promise.all(mural.map(line => meanings.request(line.text))).then(results => {
+      const found = new Map(mural.map((line, index) => [line.text, results[index]]));
+      if (results.some(Boolean)) history.save(withMeanings(record, text => found.get(text)));
+    });
+  };
   const chooseLanguage = (id: string) => { setLanguageID(id); localStorage.setItem('mural.language', id); };
   const serverUsage = usage
     ? `全家共用：今天已用 ${minutes(usage.todaySeconds)}，本月已用 ${minutes(usage.monthSeconds)}，剩余可用 ${minutes(usage.remainingSeconds)}。`
@@ -69,7 +95,16 @@ export function App() {
   if (mode === 'kid') return (
     <>
       {update}
-      <KidMode live={live} kids={kids} scenarios={scenarios} levels={levels} reportsEnabled={reportsEnabled} serverUsage={serverUsage} onExit={() => choose('home')} />
+      <KidMode live={live} kids={kids} history={history} reading={reading} typing={helpersEnabled} scenarios={scenarios} levels={levels}
+               reportsEnabled={reportsEnabled} serverUsage={serverUsage} onExit={() => choose('home')} />
+    </>
+  );
+
+  if (mode === 'history') return (
+    <>
+      {update}
+      <HistoryView history={history} kids={kids} languageName={languageName} supported={helpersEnabled ? languages.map(item => item.id) : []}
+                   onBack={() => choose('home')} />
     </>
   );
 
@@ -77,7 +112,7 @@ export function App() {
     <main className="screen">
       {update}
       <TopBar title="成人自由对话" onBack={live.busy ? undefined : () => choose('home')} />
-      <p className="muted">语音原型 · 不保存对话</p>
+      <p className="muted">对话保存在这台设备上，可在“对话历史”查看</p>
       <div className="languages" role="radiogroup" aria-label="学习语言">
         {languages.map(item => (
           <button key={item.id} role="radio" aria-checked={item.id === languageID} disabled={live.busy}
@@ -86,8 +121,10 @@ export function App() {
           </button>
         ))}
       </div>
-      <Conversation live={live} idleLabel="开始" stopLabel="结束" onStart={() => live.start({ language: languageID })} onStop={live.end}
-                    disabled={(usage?.nextSessionSeconds ?? 0) < 30} />
+      <Conversation live={live} idleLabel="开始" stopLabel="结束" reading={reading} typing={helpersEnabled}
+                    onStart={() => { const id = crypto.randomUUID(); live.start({ language: languageID }, ended => saveAdult(id, ended)); }}
+                    onStop={live.end} disabled={(usage?.nextSessionSeconds ?? 0) < 30} />
+      {history.problem && <p className="error small">{history.problem}</p>}
       {usage && !live.busy && <p className="muted small">{serverUsage}</p>}
       <Diagnostics live={live} />
     </main>
@@ -110,6 +147,11 @@ export function App() {
           <span className="avatar">💬</span>
           <strong>成人自由对话</strong>
           <span className="muted small">英语或西班牙语，随意聊天</span>
+        </button>
+        <button className="card mode" onClick={() => choose('history')}>
+          <span className="avatar">📚</span>
+          <strong>对话历史</strong>
+          <span className="muted small">查看、删除对话；导出和导入备份</span>
         </button>
       </div>
       {usage && <p className="muted small">{serverUsage}</p>}

@@ -1,56 +1,70 @@
 import { useState } from 'react';
-import { Conversation, Diagnostics, TopBar, Transcript } from './common';
-import { AVATARS, MAX_STARS_PER_TALK, STARS_PER_STICKER, STICKERS, stickers, type Category, type Kids, type LevelInfo, type Profile, type SavedReport, type Scenario } from './kids';
-import { minutes, type Ended, type Live } from './live';
+import { createRecord, recordLines, toDate, withMeanings, type KidRecord, type SessionRecord } from './archive';
+import { Conversation, Diagnostics, TopBar, Transcript, type Reading } from './common';
+import type { History } from './history';
+import { RecordView } from './HistoryView';
+import { AVATARS, MAX_STARS_PER_TALK, STARS_PER_STICKER, STICKERS, stickers, type Category, type Kids, type LevelInfo, type Profile, type Scenario } from './kids';
+import { minutes, REASON_TEXT, type Ended, type Live } from './live';
 import { ParentArea } from './Parent';
 
 type View = 'profiles' | 'scenarios' | 'talk' | 'stickers' | 'history' | 'parent';
-interface Result { status: 'writing' | 'ok' | 'none' | 'failed' | 'off'; saved?: SavedReport; newStickers: number; sessionID?: string }
+interface Result { status: 'writing' | 'ok' | 'none' | 'failed' | 'off'; saved?: SessionRecord; newStickers: number; sessionID?: string }
 
 const avatar = (profile: Profile) => AVATARS[profile.level];
 const CATEGORIES: { id: Category; nameZh: string }[] = [{ id: 'daily', nameZh: '日常生活' }, { id: 'explore', nameZh: '校外拓展' }, { id: 'news', nameZh: '新闻话题' }];
 const MINIMUM_SECONDS = 30;
 
-export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverUsage, onExit }: {
-  live: Live; kids: Kids; scenarios: Scenario[]; levels: LevelInfo[]; reportsEnabled: boolean; serverUsage: React.ReactNode; onExit: () => void;
+/** The newest review words a report suggested for this child. */
+const lastReviewWords = (history: History, profileID: string) =>
+  history.sessions.find(item => item.web?.kid?.profileID === profileID && item.web.kid.report?.reviewWords.length)?.web?.kid?.report?.reviewWords ?? [];
+
+export function KidMode({ live, kids, history, reading, typing, scenarios, levels, reportsEnabled, serverUsage, onExit }: {
+  live: Live; kids: Kids; history: History; reading: Reading; typing: boolean; scenarios: Scenario[]; levels: LevelInfo[]; reportsEnabled: boolean;
+  serverUsage: React.ReactNode; onExit: () => void;
 }) {
   const [view, setView] = useState<View>('profiles');
   const [profileID, setProfileID] = useState<string>();
   const [scenario, setScenario] = useState<Scenario>();
   const [result, setResult] = useState<Result>();
   const [category, setCategory] = useState<Category>('daily');
-  const [record, setRecord] = useState<SavedReport>();
+  const [recordID, setRecordID] = useState<string>();
   const levelName = (profile: Profile) => `难度 ${profile.level} ${levels.find(item => item.level === profile.level)?.nameZh ?? ''}`;
   const profile = kids.profiles.find(item => item.id === profileID);
 
   const writeReport = async (current: Profile, item: Scenario, ended: Ended, recordID: string) => {
-    const base: SavedReport = { id: recordID, profileID: current.id, scenarioID: item.id, scenarioTitle: item.titleZh,
-                                startedAt: new Date(Date.now() - ended.seconds * 1_000).toISOString(), seconds: ended.seconds, stars: 0, status: 'failed',
-                                transcript: ended.lines };
+    const kid = (status: KidRecord['status'], extra: Partial<KidRecord> = {}): NonNullable<SessionRecord['web']> =>
+      ({ mode: 'kid', kid: { profileID: current.id, scenarioID: item.id, level: current.level, stars: 0, status, ...extra } });
+    const base = createRecord({ id: recordID, languageID: 'en', title: item.titleZh, themeID: item.id, startedAt: ended.startedAt, seconds: ended.seconds,
+                                confirmed: ended.confirmed, endReason: REASON_TEXT(ended.reason), lines: ended.lines, web: kid('failed') });
+    const keep = (saved: SessionRecord) => { history.save(saved); addSubtitles(saved); return saved; };
     if (!reportsEnabled || !ended.sessionID) {
-      const saved = { ...base, status: 'off' as const };
-      kids.addReport(saved); setResult({ status: 'off', saved, newStickers: 0 }); return;
+      setResult({ status: 'off', saved: keep({ ...base, web: kid('off') }), newStickers: 0 }); return;
     }
     setResult({ status: 'writing', newStickers: 0, sessionID: ended.sessionID });
     try {
       const response = await fetch('/api/kid/report', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionID: ended.sessionID }),
       });
-      if (response.status === 422) {
-        const saved = { ...base, status: 'none' as const };
-        kids.addReport(saved); setResult({ status: 'none', saved, newStickers: 0 }); return;
-      }
+      if (response.status === 422) { setResult({ status: 'none', saved: keep({ ...base, web: kid('none') }), newStickers: 0 }); return; }
       if (!response.ok) throw new Error(String(response.status));
       const { report } = await response.json();
       const stars = Math.min(MAX_STARS_PER_TALK, report.repeatSuccesses);
-      const saved: SavedReport = { ...base, status: 'ok', stars, report };
-      kids.addReport(saved);
+      const saved = keep({ ...base, web: kid('ok', { stars, report }) });
+      kids.addStars(current.id, stars);
       setResult({ status: 'ok', saved, newStickers: stickers(current.stars + stars).length - stickers(current.stars).length });
     } catch {
-      const saved = base;
-      kids.addReport(saved);
-      setResult({ status: 'failed', saved, newStickers: 0, sessionID: ended.sessionID });
+      setResult({ status: 'failed', saved: keep(base), newStickers: 0, sessionID: ended.sessionID });
     }
+  };
+
+  /** Stores the subtitles shown during the call with the record, once they have arrived. */
+  const addSubtitles = (saved: SessionRecord) => {
+    if (!reading.meanings || !reading.subtitles) return;
+    const mural = saved.fragments.filter(fragment => fragment.speaker === 'assistant');
+    Promise.all(mural.map(fragment => reading.meanings!.request(fragment.text))).then(results => {
+      const found = new Map(mural.map((fragment, index) => [fragment.text, results[index]]));
+      if (results.some(Boolean)) history.save(withMeanings(saved, text => found.get(text)));
+    });
   };
 
   const start = () => {
@@ -60,7 +74,7 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
     setResult(undefined);
     const current = profile, item = scenario, recordID = crypto.randomUUID();
     live.start({ language: 'en', mode: 'kid', scenario: item.id, level: String(current.level), nickname: current.nickname,
-                 review: kids.lastReviewWords(current.id).join(','), seconds: String(seconds) }, ended => {
+                 review: lastReviewWords(history, current.id).join(','), seconds: String(seconds) }, ended => {
       kids.addUsage(current.id, ended.seconds);
       if (ended.seconds > 0) writeReport(current, item, ended, recordID);
     });
@@ -68,10 +82,13 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
 
   const retry = () => {
     if (!profile || !scenario || !result?.saved || !result.sessionID) return;
-    writeReport(profile, scenario, { sessionID: result.sessionID, reason: 'retry', seconds: result.saved.seconds, confirmed: true, lines: result.saved.transcript ?? [] }, result.saved.id);
+    const saved = result.saved;
+    writeReport(profile, scenario, { sessionID: result.sessionID, reason: saved.endReason ?? '', seconds: saved.voiceSeconds, confirmed: saved.usageFinal,
+                                     lines: recordLines(saved), startedAt: toDate(saved.startedAt) }, saved.id);
   };
 
-  if (view === 'parent') return <ParentArea kids={kids} levels={levels} serverUsage={serverUsage} onBack={() => setView('profiles')} />;
+  if (view === 'parent') return <ParentArea kids={kids} history={history} levels={levels} serverUsage={serverUsage} supported={reading.languageID ? ['en'] : []}
+                                            onBack={() => setView('profiles')} />;
 
   if (view === 'profiles' || !profile) return (
     <main className="screen">
@@ -108,23 +125,19 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
   );
 
   if (view === 'history') {
-    const items = kids.reports.filter(item => item.profileID === profile.id && item.transcript?.length);
-    if (record) return (
-      <main className="screen">
-        <TopBar title={record.scenarioTitle} onBack={() => setRecord(undefined)} />
-        <p className="muted">{new Date(record.startedAt).toLocaleString('zh-CN', { hour12: false })} · {minutes(record.seconds)} · ⭐ {record.stars}</p>
-        <Transcript lines={record.transcript ?? []} />
-      </main>
-    );
+    const items = history.sessions.filter(item => item.web?.kid?.profileID === profile.id && item.fragments.length);
+    const record = items.find(item => item.id === recordID);
+    if (record) return <RecordView record={record} history={history} supported={reading.languageID ? ['en'] : []} allowDelete={false}
+                                   label={`⭐ ${record.web?.kid?.stars ?? 0}`} onBack={() => setRecordID(undefined)} />;
     return (
       <main className="screen">
         <TopBar title="我的聊天记录" onBack={() => setView('scenarios')} />
         {items.length === 0 && <p className="muted">还没有聊天记录。</p>}
         <div className="list">
           {items.map(item => (
-            <button key={item.id} className="list-item" onClick={() => setRecord(item)}>
-              <strong>{new Date(item.startedAt).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · {item.scenarioTitle}</strong>
-              <span className="muted small">{minutes(item.seconds)} · ⭐ {item.stars} · {item.transcript!.length} 句</span>
+            <button key={item.id} className="list-item" onClick={() => setRecordID(item.id)}>
+              <strong>{toDate(item.startedAt).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · {item.title}</strong>
+              <span className="muted small">{minutes(item.voiceSeconds)} · ⭐ {item.web?.kid?.stars ?? 0} · {item.fragments.length} 句</span>
             </button>
           ))}
         </div>
@@ -137,7 +150,7 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
       <TopBar title={`${avatar(profile)} ${profile.nickname}`} onBack={() => setView('profiles')}>
         <button className="chip" onClick={() => setView('stickers')}>⭐ {profile.stars} · 贴纸 {owned.length}</button>
       </TopBar>
-      <button className="secondary" onClick={() => { setRecord(undefined); setView('history'); }}>📖 我的聊天记录</button>
+      <button className="secondary" onClick={() => { setRecordID(undefined); setView('history'); }}>📖 我的聊天记录</button>
       <p className="muted">{levelName(profile)} · 今天还可以练 {minutes(kids.remainingToday(profile))}</p>
       <div className="tabs" role="tablist">
         {CATEGORIES.map(item => (
@@ -167,9 +180,10 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
       <p className="muted">{scenario.titleEn} · 🎲 {scenario.gameZh} · {levelName(profile)}</p>
       {result && !live.busy ? <>
         <ResultPanel result={result} profile={profile} onRetry={retry} onAgain={() => { live.clear(); setView('scenarios'); }} />
-        <Transcript lines={live.lines} newestFirst />
+        <Transcript lines={live.lines} newestFirst reading={reading} />
       </> : (
         <Conversation live={live} idleLabel="开始" stopLabel={stopLabel} onStart={start} onStop={live.wrapping ? live.end : live.wrapUp}
+                      reading={reading} typing={typing}
                       disabled={kids.remainingToday(profile) < MINIMUM_SECONDS}
                       extra={live.phase === 'active' && !live.wrapping ? <button className="secondary" onClick={live.end}>立即结束</button> : undefined} />
       )}
@@ -181,7 +195,7 @@ export function KidMode({ live, kids, scenarios, levels, reportsEnabled, serverU
 }
 
 function ResultPanel({ result, profile, onRetry, onAgain }: { result: Result; profile: Profile; onRetry: () => void; onAgain: () => void }) {
-  const stars = result.saved?.stars ?? 0;
+  const stars = result.saved?.web?.kid?.stars ?? 0;
   return (
     <section className="result">
       {result.status === 'writing' && <p className="muted">正在数星星…</p>}
@@ -190,7 +204,7 @@ function ResultPanel({ result, profile, onRetry, onAgain }: { result: Result; pr
           <p className="big-stars">{stars > 0 ? '⭐'.repeat(Math.min(stars, MAX_STARS_PER_TALK)) : '💪'}</p>
           <p className="result-title">{stars > 0 ? `太棒了！你得到 ${stars} 颗星！` : '你今天很勇敢地开口了！下次跟读成功就能得星星。'}</p>
           {result.newStickers > 0 && <p className="result-title">解锁新贴纸：{stickers(profile.stars).slice(-result.newStickers).join(' ')}</p>}
-          {result.saved?.report?.teachBackWord && <p className="muted">你教会了 Mural：{result.saved.report.teachBackWord}</p>}
+          {result.saved?.web?.kid?.report?.teachBackWord && <p className="muted">你教会了 Mural：{result.saved.web.kid.report.teachBackWord}</p>}
         </>
       )}
       {result.status === 'none' && <p className="result-title">这次没有听到你说英语。下次大声说出来，就能得星星！</p>}

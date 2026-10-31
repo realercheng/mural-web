@@ -5,7 +5,7 @@ import { encodeMulaw, frame, FRAME_AUDIO, FRAME_HEARTBEAT, readOutputFrame } fro
 
 export type LivePhase = 'idle' | 'connecting' | 'active' | 'closing';
 export type { Line };
-export interface Ended { sessionID?: string; reason: string; seconds: number; confirmed: boolean; lines: Line[] }
+export interface Ended { sessionID?: string; reason: string; seconds: number; confirmed: boolean; lines: Line[]; startedAt: Date }
 
 const REASONS: Record<string, string> = {
   ended_by_learner: '你结束了对话', said_goodbye: '已说再见', time_limit: '已到本次时长上限', idle_audio: '麦克风音频中断（可能切到后台或锁屏）',
@@ -14,6 +14,12 @@ const REASONS: Record<string, string> = {
 };
 const EXPECTED = new Set(['ended_by_learner', 'said_goodbye', 'time_limit']);
 const REJECTIONS: Record<number, string> = { 1006: '连接被拒绝或中断。可能原因：未登录、额度用完或已有对话在进行。' };
+const TYPED_ERRORS: Record<string, string> = {
+  limited: '请求太频繁，或今天的打字回复次数已用完。请稍后再试，或直接说话。', unavailable: '服务器没有开启文字模型，暂时不能打字回复。',
+  invalid_text: '只能输入文字、数字和常用标点，最多 300 个字。', busy: '上一条还在发送，请稍等。',
+  not_active: '对话已结束，这条消息没有发送。', failed: '发送失败，请重试，或直接说话。',
+};
+export const REASON_TEXT = (reason: string) => REASONS[reason] ?? reason;
 export const minutes = (seconds: number) => `${Math.floor(seconds / 60)} 分 ${Math.round(seconds % 60)} 秒`;
 const clock = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
@@ -37,6 +43,7 @@ export function useLive(refresh: () => void) {
   const startedAt = useRef(0);
   const deltas = useRef<Delta[]>([]);
   const shownAt = useRef(0);
+  const typedReply = useRef<{ text: string; done: (error?: string) => void } | undefined>(undefined);
 
   const note = useCallback((text: string) => setDiagnostics(items => [`${clock()} ${text}`, ...items].slice(0, 40)), []);
 
@@ -71,6 +78,7 @@ export function useLive(refresh: () => void) {
 
   const cleanup = useCallback(async () => {
     socket.current = undefined;
+    typedReply.current?.done(TYPED_ERRORS.not_active); typedReply.current = undefined;
     await wakeLock.current?.release().catch(() => {});
     wakeLock.current = null;
     await engine.current?.stop();
@@ -136,6 +144,19 @@ export function useLive(refresh: () => void) {
           shownAt.current = 0;
           break;
         }
+        case 'mural.typed_reply': {
+          const pending = typedReply.current;
+          typedReply.current = undefined;
+          if (!pending) break;
+          if (data.status === 'ok') {
+            // The typed line goes after all speech received so far, as in the apps.
+            const startMs = Math.max(0, ...deltas.current.map(item => item.startMs)) + 1;
+            deltas.current.push({ speaker: 'user', text: pending.text, startMs, arrivedAt: Date.now(), typed: true });
+            shownAt.current = 0;
+            pending.done();
+          } else pending.done(TYPED_ERRORS[data.code] ?? TYPED_ERRORS.failed);
+          break;
+        }
         case 'error':
           note(`服务返回错误：${data.error?.code ?? 'unknown'}`);
           if (data.error?.code === 'content_filter')
@@ -147,7 +168,8 @@ export function useLive(refresh: () => void) {
           if (!EXPECTED.has(data.reason)) setMessage(current => current || `对话已结束：${REASONS[data.reason] ?? data.reason}`);
           const lines = buildLines(deltas.current, startedAt.current || Date.now());
           setLines(lines);
-          onEnded?.({ sessionID, reason: data.reason, seconds: data.seconds, confirmed: data.confirmed, lines });
+          onEnded?.({ sessionID, reason: data.reason, seconds: data.seconds, confirmed: data.confirmed, lines,
+                      startedAt: new Date(startedAt.current || Date.now() - data.seconds * 1_000) });
           break;
       }
     };
@@ -174,13 +196,24 @@ export function useLive(refresh: () => void) {
     setWrapping(true);
   };
 
+  /** Sends a typed message; resolves with an error message, or undefined once Mural is replying. */
+  const sendTyped = (text: string) => new Promise<string | undefined>(resolve => {
+    const ws = socket.current;
+    if (ws?.readyState !== WebSocket.OPEN || phase !== 'active') { resolve(TYPED_ERRORS.not_active); return; }
+    if (typedReply.current) { resolve(TYPED_ERRORS.busy); return; }
+    const clean = text.trim().replace(/\s+/g, ' ');
+    typedReply.current = { text: clean, done: resolve };
+    ws.send(JSON.stringify({ type: 'mural.typed', text: clean }));
+    note('发送打字回复');
+  });
+
   /** Empties the screen, e.g. when another child or topic is chosen. */
   const clear = () => { if (socket.current) return; deltas.current = []; setLines([]); setMessage(''); };
 
   const toggleMute = () => { const next = !muted; setMuted(next); engine.current?.mute(next); };
   const busy = phase !== 'idle';
 
-  return { phase, busy, message, setMessage, lines, muted, elapsed, allowed, wrapping, diagnostics, level, start, end, wrapUp, toggleMute, clear };
+  return { phase, busy, message, setMessage, lines, muted, elapsed, allowed, wrapping, diagnostics, level, start, end, wrapUp, toggleMute, clear, sendTyped };
 }
 
 export type Live = ReturnType<typeof useLive>;

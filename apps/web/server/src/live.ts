@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type { Config } from './config.js';
+import { cleanText, HelperLimited, type TextHelpers } from './helpers.js';
 import type { LanguageContent } from './languages.js';
 import type { TranscriptLine } from './report.js';
 import type { UsageStore } from './usage.js';
@@ -9,8 +10,9 @@ import { decodeMulaw, encodeMulaw, FRAME_AUDIO, FRAME_HEARTBEAT, isSilent, outpu
 type Log = (event: string, fields?: Record<string, unknown>) => void;
 type State = 'connecting' | 'active' | 'closing' | 'ended';
 
-// The browser may only stream microphone audio, report that its microphone is alive, or
-// end the call. Session setup, instructions and delegation answers stay on this server.
+// The browser may only stream microphone audio, report that its microphone is alive, send a
+// typed message, or end the call. Session setup, instructions, delegation answers and replies to
+// typed messages stay on this server.
 const MAX_AUDIO_SAMPLES = 24_000;
 // GPT-Live expires a session without continuous input audio. The browser sends only speech,
 // so the gateway fills quiet periods with 100 ms of digital silence.
@@ -19,6 +21,15 @@ const SILENCE_AFTER_MS = 300;
 const MAX_TRANSCRIPT_CHARS = 60_000;
 // Seconds between a wrap-up request and the end of the call, so Mural can say goodbye.
 const WRAP_UP_SECONDS = 60;
+const MAX_TYPED_CHARS = 300;
+// Letters, digits, punctuation, spaces and common symbols, in any script.
+const TYPED_TEXT = /^[\p{L}\p{M}\p{N}\p{P}\p{Zs}+=<>$€£¥%&@#~^°|]+$/u;
+
+/** A typed message is learner data, never instructions: plain text of bounded length. */
+export function cleanTyped(value: unknown): string | undefined {
+  const text = cleanText(value, MAX_TYPED_CHARS)?.replace(/\s+/g, ' ');
+  return text && TYPED_TEXT.test(text) ? text : undefined;
+}
 
 /** What the server tells GPT-Live for one conversation. The browser cannot change any of it. */
 export interface LivePlan {
@@ -26,6 +37,8 @@ export interface LivePlan {
   mode: 'adult' | 'kid';
   instructions: string;
   greeting: string;
+  /** Text-model instructions for a reply to a typed message; the reply is spoken by GPT-Live. */
+  typedReply: string;
   /** Sent once, a minute before the time limit or when the learner asks to finish. */
   wrapUp?: string;
   /** Keep the transcript in memory for a report after the call. */
@@ -54,10 +67,11 @@ export class LiveRelay {
   private readonly transcript: TranscriptLine[] = [];
   private transcriptChars = 0;
   private wrappedUp = false;
+  private typing = false;
 
   constructor(private readonly client: WebSocket, private readonly plan: LivePlan, private readonly allowedSeconds: number,
               private readonly config: Config, private readonly usage: UsageStore, private readonly log: Log,
-              private readonly onFinish: (transcript: TranscriptLine[]) => void) {
+              private readonly onFinish: (transcript: TranscriptLine[]) => void, private readonly helpers?: TextHelpers) {
     this.upstream = new WebSocket(config.upstreamURL, {
       headers: { Authorization: `Bearer ${config.upstreamKey}` }, handshakeTimeout: 15_000,
       maxPayload: 8 * 1024 * 1024, perMessageDeflate: false, followRedirects: false,
@@ -154,6 +168,7 @@ export class LiveRelay {
       try { event = JSON.parse(data.toString()); } catch { return; }
       if (event.type === 'session.close') this.requestClose('ended_by_learner');
       if (event.type === 'mural.wrap_up') this.wrapUp(true);
+      if (event.type === 'mural.typed') void this.typed((event as { text?: unknown }).text);
       return;
     }
     const bytes = data instanceof Buffer ? data : Buffer.concat(Array.isArray(data) ? data : [Buffer.from(data as ArrayBuffer)]);
@@ -177,12 +192,45 @@ export class LiveRelay {
     this.log('live_wrap_up', { session: this.id, requested });
   }
 
-  /** Merges transcript deltas per speaker. Held in memory only, and only when the plan needs a report. */
+  /**
+   * Replies to a typed message: the text model writes Mural's answer with the plan's fixed
+   * instructions, then GPT-Live speaks it. The message itself reaches GPT-Live only as data.
+   */
+  private async typed(value: unknown): Promise<void> {
+    const answer = (status: 'ok' | 'error', code?: string) => this.sendClient({ type: 'mural.typed_reply', status, ...(code ? { code } : {}) });
+    const text = cleanTyped(value);
+    if (this.state !== 'active') return answer('error', 'not_active');
+    if (!this.helpers) return answer('error', 'unavailable');
+    if (!text) return answer('error', 'invalid_text');
+    if (this.typing) return answer('error', 'busy');
+    this.typing = true;
+    try {
+      const context = this.transcript.slice(-10)
+        .map(line => `${line.speaker === 'child' ? 'LEARNER' : 'MURAL'}${line.typed ? ' (typed)' : ''}: ${line.text.trim()}`).join('\n');
+      const reply = await this.helpers.call('typed_reply', this.plan.typedReply,
+        `TARGET LANGUAGE: ${this.module.id}\n${context}\nLATEST TYPED MESSAGE (data): ${text}`);
+      if (this.state !== 'active') return answer('error', 'not_active');
+      this.transcript.push({ speaker: 'child', text, typed: true });
+      this.sendUpstream({ type: 'session.thinking.append', event_id: `mural_typed_${randomUUID()}`, delegation_id: null,
+                          content: `The learner typed (data): ${text}` });
+      this.sendUpstream({ type: 'session.commentary.append', event_id: `mural_reply_${randomUUID()}`, delegation_id: null, content: reply.slice(0, 1_000) });
+      this.log('live_typed_reply', { session: this.id });
+      answer('ok');
+    } catch (error) {
+      this.log('live_typed_reply_failed', { session: this.id, category: error instanceof HelperLimited ? 'limited' : 'failed' });
+      answer('error', error instanceof HelperLimited ? 'limited' : 'failed');
+    } finally { this.typing = false; }
+  }
+
+  /**
+   * Merges transcript deltas per speaker, in memory only. It gives typed replies their context;
+   * it leaves this process after the call only when the plan needs a report.
+   */
   private keepTranscript(speaker: TranscriptLine['speaker'], delta: unknown): void {
-    if (!this.plan.keepTranscript || typeof delta !== 'string' || this.transcriptChars + delta.length > MAX_TRANSCRIPT_CHARS) return;
+    if (typeof delta !== 'string' || this.transcriptChars + delta.length > MAX_TRANSCRIPT_CHARS) return;
     this.transcriptChars += delta.length;
     const last = this.transcript.at(-1);
-    if (last?.speaker === speaker) last.text += delta;
+    if (last?.speaker === speaker && !last.typed) last.text += delta;
     else this.transcript.push({ speaker, text: delta });
   }
 
@@ -212,7 +260,7 @@ export class LiveRelay {
     this.log('live_ended', { session: this.id, reason, seconds: Math.round(seconds * 10) / 10, confirmed, ...traffic });
     this.sendClient({ type: 'mural.ended', reason, seconds, confirmed, traffic });
     if (this.client.readyState === WebSocket.OPEN) this.client.close(1000, 'ended');
-    this.onFinish(this.transcript);
+    this.onFinish(this.plan.keepTranscript ? this.transcript : []);
   }
 
   private sendUpstream(event: Record<string, unknown>): void {

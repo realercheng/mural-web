@@ -1,38 +1,47 @@
 import { useState } from 'react';
-import { TopBar, Transcript } from './common';
-import { NICKNAME, type Kids, type Level, type LevelInfo, type Profile, type SavedReport } from './kids';
+import { recordLines, toDate, type SessionRecord } from './archive';
+import { SubtitleToggle, TopBar, Transcript } from './common';
+import type { History } from './history';
+import { useRecordReading } from './HistoryView';
+import { NICKNAME, type Kids, type Level, type LevelInfo, type Profile } from './kids';
 import { minutes } from './live';
 
 type View = { name: 'list' } | { name: 'edit'; profile?: Profile } | { name: 'reports'; profile: Profile }
-  | { name: 'report'; profile: Profile; saved: SavedReport } | { name: 'password' };
+  | { name: 'report'; profile: Profile; savedID: string } | { name: 'password' };
 
 /** Parent settings behind a device-local password: profiles, per-child daily minutes and reports. */
-export function ParentArea({ kids, levels, serverUsage, onBack }: { kids: Kids; levels: LevelInfo[]; serverUsage: React.ReactNode; onBack: () => void }) {
+export function ParentArea({ kids, history, levels, serverUsage, supported, onBack }: {
+  kids: Kids; history: History; levels: LevelInfo[]; serverUsage: React.ReactNode; supported: string[]; onBack: () => void;
+}) {
   const [unlocked, setUnlocked] = useState(false);
   const [view, setView] = useState<View>({ name: 'list' });
 
   if (!unlocked) return <Lock kids={kids} onUnlock={() => setUnlocked(true)} onBack={onBack} />;
   const toList = () => setView({ name: 'list' });
 
-  if (view.name === 'edit') return <ProfileForm kids={kids} levels={levels} profile={view.profile} onDone={toList} />;
+  if (view.name === 'edit') return <ProfileForm kids={kids} history={history} levels={levels} profile={view.profile} onDone={toList} />;
   if (view.name === 'password') return (
     <main className="screen">
       <TopBar title="修改家长密码" onBack={toList} />
       <PasswordForm label="新密码" onSubmit={async password => { await kids.setParentPassword(password); toList(); }} />
     </main>
   );
-  if (view.name === 'report') return <ReportDetail saved={view.saved} onBack={() => setView({ name: 'reports', profile: view.profile })} />;
-  if (view.name === 'reports') {
-    const items = kids.reports.filter(item => item.profileID === view.profile.id);
+  const reportsOf = (profile: Profile) => history.sessions.filter(item => item.web?.kid?.profileID === profile.id);
+  if (view.name === 'report') {
+    const saved = reportsOf(view.profile).find(item => item.id === view.savedID);
+    if (saved) return <ReportDetail saved={saved} history={history} supported={supported} onBack={() => setView({ name: 'reports', profile: view.profile })} />;
+  }
+  if (view.name === 'reports' || view.name === 'report') {
+    const items = reportsOf(view.profile);
     return (
       <main className="screen">
         <TopBar title={`${view.profile.nickname} 的报告`} onBack={toList} />
         {items.length === 0 && <p className="muted">还没有练习记录。</p>}
         <div className="list">
           {items.map(item => (
-            <button key={item.id} className="list-item" onClick={() => setView({ name: 'report', profile: view.profile, saved: item })}>
-              <strong>{new Date(item.startedAt).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · {item.scenarioTitle}</strong>
-              <span className="muted small">{minutes(item.seconds)} · ⭐ {item.stars} · {item.status === 'ok' ? item.report?.summary : item.status === 'none' ? '没有识别到孩子说话' : item.status === 'off' ? '未开启报告' : '报告未生成'}</span>
+            <button key={item.id} className="list-item" onClick={() => setView({ name: 'report', profile: view.profile, savedID: item.id })}>
+              <strong>{toDate(item.startedAt).toLocaleString('zh-CN', { hour12: false, month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · {item.title}</strong>
+              <span className="muted small">{minutes(item.voiceSeconds)} · ⭐ {item.web?.kid?.stars ?? 0} · {statusText(item)}</span>
             </button>
           ))}
         </div>
@@ -59,7 +68,7 @@ export function ParentArea({ kids, levels, serverUsage, onBack }: { kids: Kids; 
       <div className="note small muted">
         <p>{serverUsage}</p>
         <p>话题不和课本绑定。孩子进步后，点“编辑”调高难度即可。</p>
-        <p>档案、星星和报告只保存在这台设备的浏览器里。清除浏览器数据会删除它们。</p>
+        <p>档案、星星和报告只保存在这台设备的浏览器里。清除浏览器数据会删除它们。换设备前，在首页“对话历史”里导出备份。</p>
       </div>
       <button className="secondary" onClick={() => setView({ name: 'password' })}>修改家长密码</button>
     </main>
@@ -106,7 +115,7 @@ function PasswordForm({ label, confirm = true, onSubmit }: { label: string; conf
   );
 }
 
-function ProfileForm({ kids, levels, profile, onDone }: { kids: Kids; levels: LevelInfo[]; profile?: Profile; onDone: () => void }) {
+function ProfileForm({ kids, history, levels, profile, onDone }: { kids: Kids; history: History; levels: LevelInfo[]; profile?: Profile; onDone: () => void }) {
   const [nickname, setNickname] = useState(profile?.nickname ?? '');
   const [level, setLevel] = useState<Level>(profile?.level ?? 1);
   const [dailyMinutes, setDailyMinutes] = useState(profile?.dailyMinutes ?? 30);
@@ -141,20 +150,28 @@ function ProfileForm({ kids, levels, profile, onDone }: { kids: Kids; levels: Le
       </form>
       {profile && (
         <button className="danger" onClick={() => {
-          if (confirm(`删除“${profile.nickname}”的档案、星星和全部报告？此操作不能撤销。`)) { kids.deleteProfile(profile.id); onDone(); }
+          if (!confirm(`删除“${profile.nickname}”的档案、星星和全部报告？此操作不能撤销。`)) return;
+          history.remove(history.sessions.filter(item => item.web?.kid?.profileID === profile.id).map(item => item.id))
+            .then(() => { kids.deleteProfile(profile.id); onDone(); }, () => alert('删除失败，请重试。'));
         }}>删除档案</button>
       )}
     </main>
   );
 }
 
-function ReportDetail({ saved, onBack }: { saved: SavedReport; onBack: () => void }) {
-  const report = saved.report;
+const statusText = (item: SessionRecord) => {
+  const kid = item.web?.kid;
+  return kid?.status === 'ok' ? kid.report?.summary : kid?.status === 'none' ? '没有识别到孩子说话' : kid?.status === 'off' ? '未开启报告' : '报告未生成';
+};
+
+function ReportDetail({ saved, history, supported, onBack }: { saved: SessionRecord; history: History; supported: string[]; onBack: () => void }) {
+  const kid = saved.web?.kid, report = kid?.report;
+  const reading = useRecordReading(saved, history, supported);
   return (
     <main className="screen">
-      <TopBar title={saved.scenarioTitle} onBack={onBack} />
-      <p className="muted">{new Date(saved.startedAt).toLocaleString('zh-CN', { hour12: false })} · {minutes(saved.seconds)} · ⭐ {saved.stars}</p>
-      {!report && <p className="muted">{saved.status === 'none' ? '这次没有识别到孩子说英语，所以没有报告。' : saved.status === 'off' ? '服务器未开启家长报告。' : '这次的报告没有生成成功。'}</p>}
+      <TopBar title={saved.title} onBack={onBack} />
+      <p className="muted">{toDate(saved.startedAt).toLocaleString('zh-CN', { hour12: false })} · {minutes(saved.voiceSeconds)} · ⭐ {kid?.stars ?? 0}</p>
+      {!report && <p className="muted">{kid?.status === 'none' ? '这次没有识别到孩子说英语，所以没有报告。' : kid?.status === 'off' ? '服务器未开启家长报告。' : '这次的报告没有生成成功。'}</p>}
       {report && (
         <section className="report">
           <p>{report.summary}</p>
@@ -174,7 +191,11 @@ function ReportDetail({ saved, onBack }: { saved: SavedReport; onBack: () => voi
           <p className="small muted">报告由文字模型根据语音转写生成，可能有误差。</p>
         </section>
       )}
-      {saved.transcript?.length ? <><h2 className="section-title">聊天记录</h2><Transcript lines={saved.transcript} /></> : null}
+      {saved.fragments.length ? <>
+        <h2 className="section-title">聊天记录</h2>
+        <div className="row center-row"><SubtitleToggle reading={reading} /></div>
+        <Transcript lines={recordLines(saved)} reading={reading} />
+      </> : null}
     </main>
   );
 }
