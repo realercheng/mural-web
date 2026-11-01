@@ -6,6 +6,7 @@ import { Auth, COOKIE_NAME } from './auth.js';
 import type { Config } from './config.js';
 import { LiveRelay } from './live.js';
 import { kidScenario, publicKidScenarios, publicLevels } from './kids.js';
+import { assessmentInput, assessmentInstructions, assessmentSchema, parseAssessmentReply, parseAssessmentRequest } from './assessment.js';
 import { cleanText, HelperLimited, TextHelpers } from './helpers.js';
 import { language, livePlan, lookupInstructions, publicLanguages, translationInstructions } from './policy.js';
 import { PendingReports, writeReport } from './report.js';
@@ -133,6 +134,24 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
         } catch (error) {
           if (error instanceof HelperLimited) { fail(response, 429, 'helper_limited'); return; }
           log('helper_failed', { purpose, category: error instanceof Error ? error.message.slice(0, 40) : 'unknown' });
+          fail(response, 502, 'helper_failed');
+        }
+        return;
+      }
+      if (path === '/api/assess' && request.method === 'POST') {
+        if (!sameOrigin(request)) { fail(response, 403, 'origin_rejected'); return; }
+        if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
+        if (!helpers) { fail(response, 503, 'helpers_unavailable'); return; }
+        const asked = parseAssessmentRequest(await readJSON(request, 40_000));
+        const module = asked && language(asked.language);
+        if (!asked || !module) { fail(response, 400, 'invalid_request'); return; }
+        try {
+          const reply = parseAssessmentReply(await helpers.call('assessment', assessmentInstructions(module), assessmentInput(asked), assessmentSchema(module)));
+          if (!reply) { fail(response, 502, 'assessment_invalid'); return; }
+          send(response, 200, { assessment: reply });
+        } catch (error) {
+          if (error instanceof HelperLimited) { fail(response, 429, 'helper_limited'); return; }
+          log('helper_failed', { purpose: 'assessment', category: error instanceof Error ? error.message.slice(0, 40) : 'unknown' });
           fail(response, 502, 'helper_failed');
         }
         return;

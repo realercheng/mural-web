@@ -122,9 +122,9 @@ export function useRecordReading(record: SessionRecord, history: History, suppor
     Promise.all(missing.map(line => meanings.request(line.text))).then(results => {
       if (!current || !record.web || !results.some(Boolean)) return;
       const found = new Map(missing.map((line, index) => [line.text, results[index]]));
-      history.save(withMeanings(record, text => found.get(text)));
+      history.update(record.id, latest => withMeanings(latest, text => found.get(text)));
     });
     return () => { current = false; };
-  }, [record, languageID, subtitles, meanings.request, history.save]);
+  }, [record, languageID, subtitles, meanings.request, history.update]);
   return { languageID, meanings, subtitles, onSubtitles: setSubtitles };
 }

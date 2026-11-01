@@ -10,13 +10,24 @@ export interface Fragment {
   id: string; revision: number; previousTexts: string[]; speaker: Speaker; text: string;
   startMS: number; endMS: number; receivedAt: number; meaningVisible: boolean; typed: boolean;
 }
+export type EvidenceKind = 'exposure' | 'understanding' | 'assisted' | 'independent' | 'lapse';
+export type Outcome = 'success' | 'partial' | 'breakdown' | 'uncertain';
+/** `WordProposal` in Models.swift. */
+export interface WordProposal {
+  lemma: string; meaning: string; form: string; kind: EvidenceKind; confidence: number; sourceIDs: string[]; quote: string; language: string;
+}
+/** `Assessment` in Models.swift; `createdAt` is in seconds since 2001-01-01 UTC. */
+export interface Assessment {
+  passageID: string; revisionKey: string; outcome: Outcome; suggestedLevel: number; nextGoal: string; capability: string;
+  words: WordProposal[]; createdAt: number; context: string; textAssemblyVersion?: number;
+}
 export interface KidRecord {
   profileID: string; scenarioID: string; level?: number; stars: number;
   status: 'ok' | 'failed' | 'none' | 'off'; report?: KidReport;
 }
 export interface SessionRecord {
   id: string; languageID: string; providerID?: string; startedAt: number; endedAt?: number; themeID?: string; title: string;
-  fragments: Fragment[]; assessments: unknown[]; translations: Record<string, string>; topics: { languageID: string; retrievedAt: number }[];
+  fragments: Fragment[]; assessments: Assessment[]; translations: Record<string, string>; topics: { languageID: string; retrievedAt: number }[];
   voiceSeconds: number; usageFinal: boolean; inputTokens: number; outputTokens: number; searchCalls: number; endReason?: string;
   web?: { mode: 'adult' | 'kid'; kid?: KidRecord };
 }
@@ -147,7 +158,7 @@ export function joinParts(parts: string[]): string {
   return result;
 }
 
-export interface Passage { id: string; speaker: Speaker; fragments: Fragment[]; text: string; revisionKey: string; startMS: number }
+export interface Passage { id: string; speaker: Speaker; fragments: Fragment[]; text: string; revisionKey: string; startMS: number; endMS: number }
 
 /** Ports Transcript.passages: a presentation grouping of fragments, as in the apps. */
 export function passages(fragments: Fragment[]): Passage[] {
@@ -163,7 +174,7 @@ export function passages(fragments: Fragment[]): Passage[] {
     else groups.push({ id: fragment.id, speaker: fragment.speaker, fragments: [fragment] });
   }
   return groups
-    .map(group => ({ ...group, text: joinParts(group.fragments.map(fragment => fragment.text)), startMS: group.fragments[0]!.startMS,
+    .map(group => ({ ...group, text: joinParts(group.fragments.map(fragment => fragment.text)), startMS: group.fragments[0]!.startMS, endMS: endMS(group),
                      revisionKey: group.fragments.map(fragment => `${fragment.id}:${fragment.revision}`).join(',') }))
     .sort((a, b) => a.startMS - b.startMS);
 }

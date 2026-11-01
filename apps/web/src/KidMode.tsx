@@ -1,25 +1,38 @@
 import { useState } from 'react';
 import { createRecord, recordLines, toDate, withMeanings, type KidRecord, type SessionRecord } from './archive';
+import type { useAssessor } from './assess';
 import { Conversation, Diagnostics, TopBar, Transcript, type Reading } from './common';
 import type { History } from './history';
 import { RecordView } from './HistoryView';
 import { AVATARS, MAX_STARS_PER_TALK, STARS_PER_STICKER, STICKERS, stickers, type Category, type Kids, type LevelInfo, type Profile, type Scenario } from './kids';
 import { minutes, REASON_TEXT, type Ended, type Live } from './live';
+import { inScope, project, reviewWordsFor } from './learning';
+import { LearningView } from './LearningView';
 import { ParentArea } from './Parent';
 
-type View = 'profiles' | 'scenarios' | 'talk' | 'stickers' | 'history' | 'parent';
+type View = 'profiles' | 'scenarios' | 'talk' | 'stickers' | 'history' | 'parent' | 'words';
 interface Result { status: 'writing' | 'ok' | 'none' | 'failed' | 'off'; saved?: SessionRecord; newStickers: number; sessionID?: string }
 
 const avatar = (profile: Profile) => AVATARS[profile.level];
 const CATEGORIES: { id: Category; nameZh: string }[] = [{ id: 'daily', nameZh: '日常生活' }, { id: 'explore', nameZh: '校外拓展' }, { id: 'news', nameZh: '新闻话题' }];
 const MINIMUM_SECONDS = 30;
 
-/** The newest review words a report suggested for this child. */
-const lastReviewWords = (history: History, profileID: string) =>
-  history.sessions.find(item => item.web?.kid?.profileID === profileID && item.web.kid.report?.reviewWords.length)?.web?.kid?.report?.reviewWords ?? [];
+/** The words the server accepts for the opening review: plain English words only. */
+const REVIEW_WORD = /^[A-Za-z][A-Za-z' -]{0,23}$/;
 
-export function KidMode({ live, kids, history, reading, typing, scenarios, levels, reportsEnabled, serverUsage, onExit }: {
-  live: Live; kids: Kids; history: History; reading: Reading; typing: boolean; scenarios: Scenario[]; levels: LevelInfo[]; reportsEnabled: boolean;
+/**
+ * Up to three words for the opening review. They are the child's own vocabulary that is due again
+ * (see learning.ts). Until a child has any assessed words, the last report's suggestions are used.
+ */
+function reviewWords(history: History, profileID: string): string[] {
+  const hidden = Array.isArray(history.preferences.hiddenWords) ? history.preferences.hiddenWords as string[] : [];
+  const learner = project(history.sessions.filter(item => inScope(item, { kind: 'kid', profileID })), 'en', hidden);
+  if (learner.words.length) return reviewWordsFor(learner, undefined, 20).filter(word => REVIEW_WORD.test(word)).slice(0, 3);
+  return history.sessions.find(item => item.web?.kid?.profileID === profileID && item.web.kid.report?.reviewWords.length)?.web?.kid?.report?.reviewWords ?? [];
+}
+
+export function KidMode({ live, kids, history, assessor, reading, typing, scenarios, levels, reportsEnabled, serverUsage, onExit }: {
+  live: Live; kids: Kids; history: History; assessor: ReturnType<typeof useAssessor>; reading: Reading; typing: boolean; scenarios: Scenario[]; levels: LevelInfo[]; reportsEnabled: boolean;
   serverUsage: React.ReactNode; onExit: () => void;
 }) {
   const [view, setView] = useState<View>('profiles');
@@ -36,7 +49,12 @@ export function KidMode({ live, kids, history, reading, typing, scenarios, level
       ({ mode: 'kid', kid: { profileID: current.id, scenarioID: item.id, level: current.level, stars: 0, status, ...extra } });
     const base = createRecord({ id: recordID, languageID: 'en', title: item.titleZh, themeID: item.id, startedAt: ended.startedAt, seconds: ended.seconds,
                                 confirmed: ended.confirmed, endReason: REASON_TEXT(ended.reason), lines: ended.lines, web: kid('failed') });
-    const keep = (saved: SessionRecord) => { history.save(saved); addSubtitles(saved); return saved; };
+    const keep = (saved: SessionRecord) => {
+      // A retry rebuilds the record: keep what an earlier save already gathered.
+      const kept = { ...saved, assessments: history.get(saved.id)?.assessments ?? saved.assessments };
+      history.save(kept); addSubtitles(kept); assessor.complete(history, kept.id);
+      return kept;
+    };
     if (!reportsEnabled || !ended.sessionID) {
       setResult({ status: 'off', saved: keep({ ...base, web: kid('off') }), newStickers: 0 }); return;
     }
@@ -63,7 +81,7 @@ export function KidMode({ live, kids, history, reading, typing, scenarios, level
     const mural = saved.fragments.filter(fragment => fragment.speaker === 'assistant');
     Promise.all(mural.map(fragment => reading.meanings!.request(fragment.text))).then(results => {
       const found = new Map(mural.map((fragment, index) => [fragment.text, results[index]]));
-      if (results.some(Boolean)) history.save(withMeanings(saved, text => found.get(text)));
+      if (results.some(Boolean)) history.update(saved.id, latest => withMeanings(latest, text => found.get(text)));
     });
   };
 
@@ -73,8 +91,9 @@ export function KidMode({ live, kids, history, reading, typing, scenarios, level
     if (seconds < MINIMUM_SECONDS) { live.setMessage('今天的练习时间用完了，明天再来吧！'); return; }
     setResult(undefined);
     const current = profile, item = scenario, recordID = crypto.randomUUID();
+    assessor.begin('en', item.id);
     live.start({ language: 'en', mode: 'kid', scenario: item.id, level: String(current.level), nickname: current.nickname,
-                 review: lastReviewWords(history, current.id).join(','), seconds: String(seconds) }, ended => {
+                 review: reviewWords(history, current.id).join(','), seconds: String(seconds) }, ended => {
       kids.addUsage(current.id, ended.seconds);
       if (ended.seconds > 0) writeReport(current, item, ended, recordID);
     });
@@ -109,6 +128,11 @@ export function KidMode({ live, kids, history, reading, typing, scenarios, level
   );
 
   const owned = stickers(profile.stars);
+
+  if (view === 'words') return (
+    <LearningView history={history} scope={{ kind: 'kid', profileID: profile.id }} title={`${profile.nickname} 的单词`} languages={[{ id: 'en', nativeName: 'English' }]}
+                  defaultLanguage="en" enabled={typing} canHide={false} onBack={() => setView('scenarios')} />
+  );
 
   if (view === 'stickers') return (
     <main className="screen">
@@ -150,7 +174,10 @@ export function KidMode({ live, kids, history, reading, typing, scenarios, level
       <TopBar title={`${avatar(profile)} ${profile.nickname}`} onBack={() => setView('profiles')}>
         <button className="chip" onClick={() => setView('stickers')}>⭐ {profile.stars} · 贴纸 {owned.length}</button>
       </TopBar>
-      <button className="secondary" onClick={() => { setRecordID(undefined); setView('history'); }}>📖 我的聊天记录</button>
+      <div className="row center-row">
+        <button className="secondary" onClick={() => { setRecordID(undefined); setView('history'); }}>📖 我的聊天记录</button>
+        <button className="secondary" onClick={() => setView('words')}>🃏 我的单词</button>
+      </div>
       <p className="muted">{levelName(profile)} · 今天还可以练 {minutes(kids.remainingToday(profile))}</p>
       <div className="tabs" role="tablist">
         {CATEGORIES.map(item => (

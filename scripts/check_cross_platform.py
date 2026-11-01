@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Detect drift between the Swift and Kotlin cores that Android ports by hand.
 
-Three checks, each returning a list of human-readable failure lines (empty when the
+Four checks, each returning a list of human-readable failure lines (empty when the
 platforms agree):
 
   prompts        apps/ios/Core/TeachingPolicy.swift vs .../core/TeachingPolicy.kt: the actual
@@ -9,6 +9,9 @@ platforms agree):
                  collapsed to a placeholder so wording (not syntax) is what is checked.
   constants      A fixed table of shared numeric thresholds, each extracted from both
                  platforms with a small regex and compared for equality.
+  web            The web app in apps/web (TypeScript) against Swift: the learning-core
+                 constants, the wording of the per-turn assessment instructions and the
+                 "Words to revisit" line of the voice instructions.
   archive-fields Stored, non-optional properties of the Codable structs that make up the
                  backup archive, which must all exist on the matching Kotlin data class
                  (and, where Models.kt validates them explicitly, in its `fields(...)`
@@ -525,12 +528,108 @@ def check_archive_fields(swift_path, kotlin_path):
 
 
 # --------------------------------------------------------------------------------------
+# web (apps/web, TypeScript) against Swift
+
+WEB_LEARNING = 'apps/web/src/learning.ts'
+WEB_ASSESSMENT = 'apps/web/server/src/assessment.ts'
+
+# name in CONSTANTS -> (kind, TypeScript relpath, TypeScript regex). The Swift side of each is the one in CONSTANTS.
+WEB_CONSTANTS = [
+    ('transcript_gap_ms', 'scalar', 'apps/web/src/archive.ts', r'startMS - endMS\(group\) <= (\d[\d_]*)'),
+    ('max_words', 'scalar', WEB_LEARNING, r'MAX_WORDS = (\d[\d_]*)'),
+    ('next_goal_prefix', 'scalar', WEB_LEARNING, r'NEXT_GOAL_PREFIX = (\d[\d_]*)'),
+    ('capability_prefix', 'scalar', WEB_LEARNING, r'CAPABILITY_PREFIX = (\d[\d_]*)'),
+    ('min_word_confidence', 'scalar', WEB_LEARNING, r'MIN_WORD_CONFIDENCE = (\d+\.\d+)'),
+    ('imitation_window_ms', 'scalar', WEB_LEARNING, r'IMITATION_WINDOW_MS = (\d[\d_]*)'),
+    ('review_intervals_days', 'list', WEB_LEARNING, r'REVIEW_INTERVAL_DAYS = \[([\d., ]+)\]'),
+    ('steady_window_days', 'scalar', WEB_LEARNING, r'STEADY_WINDOW_DAYS = (\d[\d_]*)'),
+    ('steady_min_days', 'scalar', WEB_LEARNING, r'STEADY_MIN_DAYS = (\d[\d_]*)'),
+    ('steady_min_contexts', 'scalar', WEB_LEARNING, r'STEADY_MIN_CONTEXTS = (\d[\d_]*)'),
+    ('capability_evidence_min', 'scalar', WEB_LEARNING, r'CAPABILITY_EVIDENCE_MIN = (\d[\d_]*)'),
+]
+# Constants with their own Swift pattern: (name, swift relpath, swift regex, TypeScript relpath, TypeScript regex)
+WEB_EXTRA_CONSTANTS = [
+    ('final_assessment_seconds', 'apps/ios/Core/FinalAssessmentQueue.swift', r'min\((\d+), max\(0\.001, timeout\)\)', WEB_LEARNING, r'FINAL_ASSESSMENT_SECONDS = (\d[\d_]*)'),
+]
+
+
+def check_web_constants(root):
+    failures = []
+    swift_side = {name: (kind, swift) for name, kind, swift, _kotlin in CONSTANTS}
+    rows = [(name, kind, *swift_side[name][1], ts_path, ts_pattern) for name, kind, ts_path, ts_pattern in WEB_CONSTANTS]
+    rows += [(name, 'scalar', swift_path, swift_pattern, ts_path, ts_pattern)
+             for name, swift_path, swift_pattern, ts_path, ts_pattern in WEB_EXTRA_CONSTANTS]
+    for name, kind, swift_path, swift_pattern, ts_path, ts_pattern in rows:
+        swift_hit, ts_hit = _find(root, swift_path, swift_pattern), _find(root, ts_path, ts_pattern)
+        errors = [hit for hit in (swift_hit, ts_hit) if isinstance(hit, str)]
+        if errors:
+            failures.append(f"web: {name}: {'; '.join(errors)}. Restore the constant or update WEB_CONSTANTS in scripts/check_cross_platform.py.")
+            continue
+        if _parse_value(swift_hit[2], kind) != _parse_value(ts_hit[2], kind):
+            failures.append(f"web: {name} is {swift_hit[2]} in Swift but {ts_hit[2]} in TypeScript. "
+                            f"Update {ts_hit[0]}:{ts_hit[1]} to match {swift_hit[0]}:{swift_hit[1]}.")
+    return failures
+
+
+def _collapse_ts_interp(s):
+    """Replace each TypeScript `${expr}` (balanced braces) with a `{}` placeholder."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        if s[i:i + 2] == '${':
+            depth, i = 1, i + 2
+            while i < n and depth:
+                depth += {'{': 1, '}': -1}.get(s[i], 0)
+                i += 1
+            out.append('{}')
+        else:
+            out.append(s[i]); i += 1
+    return ''.join(out)
+
+
+def ts_assessment_prompt(text):
+    """The lines of `assessmentInstructions` (template literals in an array joined by newlines), normalized."""
+    match = re.search(r'export function assessmentInstructions\([^)]*\)[^{]*\{\s*return \[(.*?)\]\.join\(\'\\n\'\)', text, re.S)
+    if not match:
+        return None
+    return '\n'.join(_collapse_ts_interp(part) for part in re.findall(r'`((?:[^`\\]|\\.|\$\{[^}]*\})*)`', match.group(1)))
+
+
+def check_web_prompts(root):
+    swift_path, ts_path = root / 'apps/ios/Core/TeachingPolicy.swift', root / WEB_ASSESSMENT
+    swift_text, ts_text = swift_path.read_text(), ts_path.read_text()
+    failures = []
+    swift = swift_prompts(swift_text).get('assessment')
+    ts = ts_assessment_prompt(ts_text)
+    if swift is None or ts is None:
+        failures.append(f"web: assessment instructions not found in {swift_path.name if swift is None else ts_path.name}. "
+                        f"Update {WEB_ASSESSMENT} or scripts/check_cross_platform.py.")
+    elif swift != ts:
+        position = next((i for i, (a, b) in enumerate(zip(swift, ts)) if a != b), min(len(swift), len(ts)))
+        failures.append(f"web: assessment() wording differs between Swift and TypeScript near {swift[max(0, position - 20):position + 30]!r}. "
+                        f"Update {WEB_ASSESSMENT}:{line_of(ts_text, ts_text.index('assessmentInstructions'))} to match "
+                        f"{swift_path}:{line_of(swift_text, swift_text.index('func assessment('))}.")
+    # The sentence that puts due words into the voice instructions.
+    sentence = 'Words to revisit when relevant: '
+    if sentence not in swift_text.replace('\\(', '') or sentence not in (root / 'apps/web/server/src/policy.ts').read_text():
+        failures.append(f"web: the voice instruction '{sentence}' is missing on one platform. "
+                        f"Update apps/web/server/src/policy.ts to match {swift_path}.")
+    return failures
+
+
+def check_web(root):
+    if not (root / 'apps/web').exists():
+        return []
+    return check_web_constants(root) + check_web_prompts(root)
+
+
+# --------------------------------------------------------------------------------------
 
 def run_checks(root):
     failures = []
     failures += check_prompts(root / 'apps/ios/Core/TeachingPolicy.swift',
                                root / 'apps/android/app/src/main/java/chat/mural/core/TeachingPolicy.kt')
     failures += check_constants(root)
+    failures += check_web(root)
     failures += check_archive_fields(root / 'apps/ios/Core/Models.swift',
                                       root / 'apps/android/app/src/main/java/chat/mural/core/Models.kt')
     return failures

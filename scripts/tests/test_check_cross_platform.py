@@ -230,6 +230,49 @@ class ArchiveFieldsReverseTests(unittest.TestCase):
         self.assertEqual(self.check(ArchiveFieldsTests.SWIFT_OK, kotlin), [])
 
 
+class WebTests(unittest.TestCase):
+    def copy_repo_files(self, root):
+        for relpath in {path for _, _, path, _ in ccp.WEB_CONSTANTS} | {ccp.WEB_ASSESSMENT, 'apps/web/server/src/policy.ts',
+                                                                         'apps/ios/Core/TeachingPolicy.swift', 'apps/ios/Core/LearningEngine.swift',
+                                                                         'apps/ios/Core/FinalAssessmentQueue.swift', 'apps/ios/Core/Models.swift'}:
+            target = root / relpath
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((REPO_ROOT / relpath).read_text())
+        (root / 'apps/web').mkdir(exist_ok=True)
+
+    def test_real_web_app_matches_swift(self):
+        self.assertEqual(ccp.check_web(REPO_ROOT), [])
+
+    def test_changed_web_constant_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            self.copy_repo_files(root)
+            path = root / ccp.WEB_LEARNING
+            path.write_text(path.read_text().replace('STEADY_MIN_DAYS = 3', 'STEADY_MIN_DAYS = 4'))
+            failures = ccp.check_web(root)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('steady_min_days is 3 in Swift but 4 in TypeScript', failures[0])
+
+    def test_changed_assessment_wording_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            self.copy_repo_files(root)
+            path = root / ccp.WEB_ASSESSMENT
+            path.write_text(path.read_text().replace('Return the specified JSON only.', 'Return JSON.'))
+            failures = ccp.check_web(root)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('assessment() wording differs', failures[0])
+
+    def test_missing_web_constant_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            self.copy_repo_files(root)
+            path = root / ccp.WEB_LEARNING
+            path.write_text(path.read_text().replace('MAX_WORDS = 12', 'MAX_WORDS_RENAMED = 12'))
+            failures = ccp.check_web(root)
+        self.assertTrue(any('max_words' in failure and 'pattern not found' in failure for failure in failures))
+
+
 class RealRepoTests(unittest.TestCase):
     def test_real_repo_has_no_drift(self):
         failures = ccp.run_checks(REPO_ROOT)
