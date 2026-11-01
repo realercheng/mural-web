@@ -1,7 +1,8 @@
 import type { Config } from './config.js';
 import { LEVELS, type KidReport, type KidScenario, type Level } from './kids.js';
+import { respond } from './responses.js';
 
-export interface TranscriptLine { speaker: 'child' | 'mural'; text: string }
+export interface TranscriptLine { speaker: 'child' | 'mural'; text: string; typed?: boolean }
 
 const PENDING_MINUTES = 30;
 const MAX_TRANSCRIPT_CHARS = 30_000;
@@ -61,33 +62,20 @@ const INSTRUCTIONS = [
   'You write a short report for a Chinese parent about one English speaking practice between their primary-school child and Mural, an AI speaking partner.',
   'The transcript comes from speech recognition. The child\'s lines can contain recognition mistakes; do not count a likely recognition mistake as the child\'s error. Base every item only on the transcript; never invent words, errors or praise.',
   'List in corrections only real errors. If Mural treated a correct sentence as an error, do not list it.',
-  'Count repeatSuccesses only when Mural asked the child to say or repeat a sentence and the child\'s next line says it correctly or nearly correctly. A turn with no child line counts as nothing.',
+  'Count repeatSuccesses only when Mural asked the child to say or repeat a sentence and the child\'s next line says it correctly or nearly correctly. A turn with no child line counts as nothing. Lines marked (typed) were typed, not spoken, and never count.',
   'If the difficulty level looks clearly too easy or too hard for the child, say so in one nextSteps item and suggest the level to use.',
   'Write summary, note and nextSteps in simple, natural Chinese for a parent. Keep English items exactly as practised. Do not include any personal information the child may have mentioned.',
 ].join('\n');
 
-export class ReportUnavailable extends Error {}
-
 /** Asks the text model for a parent report. The transcript is sent once and not stored. */
 export async function writeReport(text: NonNullable<Config['text']>, scenario: KidScenario, level: Level, lines: TranscriptLine[],
                                   fetcher: typeof fetch = fetch): Promise<KidReport> {
-  let transcript = lines.map(line => `${line.speaker === 'child' ? 'Child' : 'Mural'}: ${line.text.trim()}`).join('\n');
+  let transcript = lines.map(line => `${line.speaker === 'child' ? 'Child' : 'Mural'}${line.typed ? ' (typed)' : ''}: ${line.text.trim()}`).join('\n');
   if (transcript.length > MAX_TRANSCRIPT_CHARS) transcript = transcript.slice(-MAX_TRANSCRIPT_CHARS);
-  const response = await fetcher(`${text.url}/responses`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${text.key}`, 'Content-Type': 'application/json' },
-    signal: AbortSignal.timeout(90_000),
-    body: JSON.stringify({
-      model: text.model, instructions: INSTRUCTIONS, max_output_tokens: 4_000, reasoning: { effort: 'low' }, store: false,
-      input: `Difficulty level ${level} of 4 (${LEVELS[level].nameZh}). Topic: ${scenario.titleEn} (${scenario.titleZh}). Target words: ${scenario.words.join(', ')}.\n\nTranscript:\n${transcript}`,
-      text: { format: { type: 'json_schema', name: 'kid_report', strict: true, schema: SCHEMA } },
-    }),
-  });
-  if (!response.ok) throw new ReportUnavailable(`upstream_${response.status}`);
-  const body = await response.json() as { output?: { type?: string; content?: { type?: string; text?: string }[] }[] };
-  const output = body.output?.flatMap(item => item.type === 'message' ? item.content ?? [] : [])
-    .find(part => part.type === 'output_text')?.text;
-  if (!output) throw new ReportUnavailable('empty_output');
+  const output = await respond(text, {
+    instructions: INSTRUCTIONS, maxOutputTokens: 4_000, timeoutMs: 90_000, schema: { name: 'kid_report', schema: SCHEMA },
+    input: `Difficulty level ${level} of 4 (${LEVELS[level].nameZh}). Topic: ${scenario.titleEn} (${scenario.titleZh}). Target words: ${scenario.words.join(', ')}.\n\nTranscript:\n${transcript}`,
+  }, fetcher);
   return clean(JSON.parse(output));
 }
 

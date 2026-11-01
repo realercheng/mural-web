@@ -7,8 +7,12 @@
  * - Mural's words appear when their speech plays (`playedMs`), so the text never runs ahead of
  *   the voice. A word that has waited for 3 s is shown anyway, e.g. when audio is not playing.
  */
-export interface Delta { speaker: 'user' | 'assistant'; text: string; startMs: number; arrivedAt: number }
-export interface Line { speaker: 'user' | 'assistant'; text: string; /** ISO time the line started. */ time: string }
+export interface Delta { speaker: 'user' | 'assistant'; text: string; startMs: number; arrivedAt: number; typed?: boolean }
+export interface Line {
+  speaker: 'user' | 'assistant'; text: string; /** ISO time the line started. */ time: string;
+  /** Position on the conversation's timeline; absent in records saved before history existed. */
+  startMs?: number; endMs?: number; typed?: boolean;
+}
 
 const SHOW_UNPLAYED_AFTER_MS = 3_000;
 
@@ -20,8 +24,10 @@ export function buildLines(deltas: Delta[], sessionStart: number, playedMs = Inf
   const lines: Line[] = [];
   for (const { delta } of visible) {
     const last = lines.at(-1);
-    if (last?.speaker === delta.speaker) last.text += delta.text;
-    else lines.push({ speaker: delta.speaker, text: delta.text.trimStart(), time: new Date(sessionStart + delta.startMs).toISOString() });
+    // A typed message is its own line, never merged with speech.
+    if (last?.speaker === delta.speaker && !last.typed && !delta.typed) { last.text += delta.text; last.endMs = delta.startMs; }
+    else lines.push({ speaker: delta.speaker, text: delta.text.trimStart(), time: new Date(sessionStart + delta.startMs).toISOString(),
+                      startMs: delta.startMs, endMs: delta.startMs, ...(delta.typed ? { typed: true } : {}) });
   }
   return lines;
 }

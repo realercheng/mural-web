@@ -23,8 +23,10 @@ export interface Config {
   dataDir: string;
   staticDir: string;
   timeZone: string;
-  /** Responses API for kid-mode parent reports; reports are off when unset. */
+  /** Responses API for parent reports, subtitles, word lookup and typed replies; all are off when unset. */
   text?: { url: string; key: string; model: string };
+  /** Shared budget for subtitles, word lookup and typed replies. Parent reports are not counted. */
+  helperLimits: { perMinute: number; perDay: number };
 }
 
 function text(env: NodeJS.ProcessEnv, name: string, fallback?: string): string {
@@ -71,6 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     staticDir: resolve(text(env, 'STATIC_DIR', 'dist')),
     timeZone: text(env, 'USAGE_TIME_ZONE', 'Asia/Shanghai'),
     text: textModel(env),
+    helperLimits: { perMinute: seconds(env, 'HELPER_PER_MINUTE', 12, 60), perDay: seconds(env, 'HELPER_DAILY_LIMIT', 600, 10_000) },
   };
 }
 

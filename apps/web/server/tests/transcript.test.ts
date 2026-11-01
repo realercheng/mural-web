@@ -20,3 +20,9 @@ test("Mural's words wait for their speech, but never more than 3 s", () => {
   assert.equal(buildLines(deltas, 0, 1_000, 10_500)[0]!.text, 'Hello');
   assert.equal(buildLines(deltas, 0, -Infinity, 13_500)[0]!.text, 'Hello there');
 });
+
+test('a typed message stays its own line, after the speech received before it', () => {
+  const deltas: Delta[] = [delta('user', ' I like', 1_000), { ...delta('user', 'I like noodles', 1_401), typed: true }, delta('user', ' rice', 1_400)];
+  assert.deepEqual(buildLines(deltas, 0).map(line => [line.text, line.typed ?? false, line.startMs]),
+                   [['I like rice', false, 1_000], ['I like noodles', true, 1_401]]);
+});
