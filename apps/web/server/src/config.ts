@@ -27,6 +27,10 @@ export interface Config {
   text?: { url: string; key: string; model: string };
   /** Shared budget for subtitles, word lookup and typed replies. Parent reports are not counted. */
   helperLimits: { perMinute: number; perDay: number };
+  /** Current-topic searches (text model with web search) per day in `timeZone`; 0 turns them off. */
+  topicDailyLimit: number;
+  /** Quiet seconds after Mural's last speech before one gentle check-in; 0 turns it off. */
+  checkInSeconds: number;
 }
 
 function text(env: NodeJS.ProcessEnv, name: string, fallback?: string): string {
@@ -74,6 +78,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     timeZone: text(env, 'USAGE_TIME_ZONE', 'Asia/Shanghai'),
     text: textModel(env),
     helperLimits: { perMinute: seconds(env, 'HELPER_PER_MINUTE', 20, 60), perDay: seconds(env, 'HELPER_DAILY_LIMIT', 1_000, 10_000) },
+    topicDailyLimit: seconds(env, 'TOPIC_DAILY_LIMIT', 10, 1_000),
+    checkInSeconds: seconds(env, 'CHECK_IN_SECONDS', 15, 600),
   };
 }
 
