@@ -93,7 +93,7 @@ export function LearningView({ history, scope, title, languages, defaultLanguage
       {state.words.length === 0 && <p className="muted center-text">还没有单词记录。多聊几轮，Mural 会把用到的词记在这里。</p>}
       <div className="list">
         {state.words.map(word => (
-          <div key={word.id} className="list-item word">
+          <div key={word.id} className="list-item word-item">
             <div className="row between">
               <strong>{word.lemma}</strong>
               <Bars word={word} />

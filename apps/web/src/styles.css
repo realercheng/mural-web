@@ -112,7 +112,7 @@ header { text-align: center; }
 .bar { width: 1.1rem; height: 0.45rem; border-radius: 999px; background: var(--peach); }
 .bar.filled { background: var(--orange); }
 .summary { align-items: flex-start; text-align: left; width: 100%; }
-.word { width: 100%; }
+.word-item { width: 100%; }
 .row.between { display: flex; justify-content: space-between; align-items: center; width: 100%; }
 .flashcard {
   width: 100%; min-height: 14rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.8rem;
