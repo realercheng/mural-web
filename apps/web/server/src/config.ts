@@ -73,7 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     staticDir: resolve(text(env, 'STATIC_DIR', 'dist')),
     timeZone: text(env, 'USAGE_TIME_ZONE', 'Asia/Shanghai'),
     text: textModel(env),
-    helperLimits: { perMinute: seconds(env, 'HELPER_PER_MINUTE', 12, 60), perDay: seconds(env, 'HELPER_DAILY_LIMIT', 600, 10_000) },
+    helperLimits: { perMinute: seconds(env, 'HELPER_PER_MINUTE', 20, 60), perDay: seconds(env, 'HELPER_DAILY_LIMIT', 1_000, 10_000) },
   };
 }
 

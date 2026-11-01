@@ -1,17 +1,19 @@
 import type { Config } from './config.js';
-import { respond } from './responses.js';
+import { respond, type ResponsesCall } from './responses.js';
 
 // Short text-model calls during and after a conversation. Ports the purpose allowlist of
 // services/api/src/hosted-helpers.ts for one user without accounts or billing: each purpose has
 // fixed server-side instructions, an input size limit and an output limit, and all purposes share
 // a per-minute and a per-day call budget. Content is held only for the duration of one call.
-export const HELPER_PURPOSES = ['meaning', 'lookup', 'typed_reply'] as const;
+export const HELPER_PURPOSES = ['meaning', 'lookup', 'typed_reply', 'assessment'] as const;
 export type HelperPurpose = typeof HELPER_PURPOSES[number];
 
 const LIMITS: Record<HelperPurpose, { maxOutputTokens: number; timeoutMs: number; maxChars: number }> = {
   meaning: { maxOutputTokens: 1_000, timeoutMs: 20_000, maxChars: 800 },
   lookup: { maxOutputTokens: 800, timeoutMs: 20_000, maxChars: 400 },
   typed_reply: { maxOutputTokens: 1_000, timeoutMs: 20_000, maxChars: 600 },
+  // Structured JSON, per learner turn; the result is checked again in the browser before it is kept.
+  assessment: { maxOutputTokens: 2_500, timeoutMs: 20_000, maxChars: 8_000 },
 };
 
 export class HelperLimited extends Error {}
@@ -37,12 +39,13 @@ export class TextHelpers {
     return Math.max(0, this.limits.perDay - (this.day.key === this.dayKey() ? this.day.total : 0));
   }
 
-  async call(purpose: HelperPurpose, instructions: string, input: string): Promise<string> {
+  async call(purpose: HelperPurpose, instructions: string, input: string, schema?: ResponsesCall['schema']): Promise<string> {
     this.admit();
     const limit = LIMITS[purpose];
     this.inFlight++;
     try {
-      const output = await respond(this.text, { instructions, input, maxOutputTokens: limit.maxOutputTokens, timeoutMs: limit.timeoutMs }, this.fetcher);
+      const output = await respond(this.text, { instructions, input, maxOutputTokens: limit.maxOutputTokens, timeoutMs: limit.timeoutMs, ...(schema ? { schema } : {}) }, this.fetcher);
+      if (schema) return output;
       // Shown as plain text or spoken: drop Markdown emphasis such as **look after**.
       return output.replace(/\*\*(.+?)\*\*/gu, '$1').trim().slice(0, limit.maxChars);
     } finally { this.inFlight--; }
