@@ -5,10 +5,16 @@
     "moduleResolution": "NodeNext",
     "strict": true,
     "noUncheckedIndexedAccess": false,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "outDir": "../dist-server",
     "rootDir": "src",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.json"
+  ]
 }

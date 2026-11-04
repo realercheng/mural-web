@@ -7,10 +7,12 @@ export type LivePhase = 'idle' | 'connecting' | 'active' | 'closing';
 export type { Line };
 export interface Ended { sessionID?: string; reason: string; seconds: number; confirmed: boolean; lines: Line[]; startedAt: Date }
 
+export interface HistoryMessage { role: 'user' | 'assistant'; text: string }
+
 const REASONS: Record<string, string> = {
   ended_by_learner: '你结束了对话', said_goodbye: '已说再见', time_limit: '已到本次时长上限', idle_audio: '麦克风音频中断（可能切到后台或锁屏）',
   browser_disconnected: '页面连接断开', upstream_rejected: '语音服务拒绝连接', upstream_error: '语音服务连接出错',
-  upstream_closed: '语音服务关闭了连接', start_timeout: '语音服务启动超时', expired: '会话因无输入音频而过期',
+  upstream_closed: '语音服务关闭了连接', start_timeout: '语音服务启动超时', invalid_history: '上次对话的内容无法接上', expired: '会话因无输入音频而过期',
 };
 const EXPECTED = new Set(['ended_by_learner', 'said_goodbye', 'time_limit']);
 const REJECTIONS: Record<number, string> = { 1006: '连接被拒绝或中断。可能原因：未登录、额度用完或已有对话在进行。' };
@@ -89,7 +91,8 @@ export function useLive(refresh: () => void) {
     refresh();
   }, [refresh]);
 
-  const start = async (query: Record<string, string>, onEnded?: (ended: Ended) => void) => {
+  /** `earlier` is the end of an earlier conversation to continue; the server puts it into the new session. */
+  const start = async (query: Record<string, string>, onEnded?: (ended: Ended) => void, earlier?: HistoryMessage[]) => {
     deltas.current = [];
     setMessage(''); setLines([]); setElapsed(0); setWrapping(false); setPhase('connecting');
     const audio = new AudioEngine();
@@ -113,6 +116,7 @@ export function useLive(refresh: () => void) {
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/live?${new URLSearchParams(query)}`);
     socket.current = ws;
     ws.binaryType = 'arraybuffer';
+    if (earlier) ws.onopen = () => ws.send(JSON.stringify({ type: 'mural.history', messages: earlier }));
     const gate = new SpeechGate(pcm => {
       if (ws.readyState === WebSocket.OPEN) ws.send(pcm ? frame(FRAME_AUDIO, encodeMulaw(pcm)) : frame(FRAME_HEARTBEAT));
     });
@@ -196,6 +200,12 @@ export function useLive(refresh: () => void) {
     setWrapping(true);
   };
 
+  /** Adult mode: Mural restates its last idea more simply. */
+  const help = () => {
+    const ws = socket.current;
+    if (ws?.readyState === WebSocket.OPEN && phase === 'active') { ws.send(JSON.stringify({ type: 'mural.help' })); note('请 Mural 说得更简单'); }
+  };
+
   /** Sends a typed message; resolves with an error message, or undefined once Mural is replying. */
   const sendTyped = (text: string) => new Promise<string | undefined>(resolve => {
     const ws = socket.current;
@@ -213,7 +223,7 @@ export function useLive(refresh: () => void) {
   const toggleMute = () => { const next = !muted; setMuted(next); engine.current?.mute(next); };
   const busy = phase !== 'idle';
 
-  return { phase, busy, message, setMessage, lines, muted, elapsed, allowed, wrapping, diagnostics, level, start, end, wrapUp, toggleMute, clear, sendTyped };
+  return { phase, busy, message, setMessage, lines, muted, elapsed, allowed, wrapping, diagnostics, level, start, end, wrapUp, help, toggleMute, clear, sendTyped };
 }
 
 export type Live = ReturnType<typeof useLive>;

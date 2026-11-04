@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import type { Config } from './config.js';
+import { cleanHistory, type HistoryItem } from './continuation.js';
 import { cleanText, HelperLimited, type TextHelpers } from './helpers.js';
+import { looksOffLanguage, MIN_CHECK_CHARS } from './language-check.js';
 import type { LanguageContent } from './languages.js';
 import type { TranscriptLine } from './report.js';
 import type { UsageStore } from './usage.js';
@@ -43,7 +45,21 @@ export interface LivePlan {
   wrapUp?: string;
   /** Keep the transcript in memory for a report after the call. */
   keepTranscript: boolean;
+  /** The browser sends the end of an earlier conversation first; the session starts after it arrives. */
+  continuing?: boolean;
+  /** Sent once after a quiet spell, when the learner presses help, and when Mural's reply leaves the target language. */
+  checkIn?: string;
+  help?: string;
+  redirect?: string;
 }
+
+// A check-in waits this long after Mural's last speech (set by CHECK_IN_SECONDS). The browser's
+// help button and language redirects are limited so they cannot flood the session.
+const HELP_GAP_MS = 5_000;
+const REDIRECT_GAP_MS = 30_000;
+const MAX_REDIRECTS = 3;
+// A reply is judged when it has been unchanged for this long.
+const REPLY_SETTLED_MS = 1_500;
 
 /**
  * Relays one browser conversation to GPT-Live over WebSocket. The provider key never
@@ -68,6 +84,18 @@ export class LiveRelay {
   private transcriptChars = 0;
   private wrappedUp = false;
   private typing = false;
+  private upstreamOpen = false;
+  private history?: HistoryItem[];
+  // Quiet check-in: counted from Mural's last speech, reset when the learner speaks.
+  private quietSince = 0;
+  private muralSpoke = false;
+  private checkedIn = false;
+  private lastHelpAt = 0;
+  // Language redirect: the newest line of Mural's is judged once it has settled.
+  private lastMuralDeltaAt = 0;
+  private judgedLine = -1;
+  private redirects = 0;
+  private lastRedirectAt = 0;
 
   constructor(private readonly client: WebSocket, private readonly plan: LivePlan, private readonly allowedSeconds: number,
               private readonly config: Config, private readonly usage: UsageStore, private readonly log: Log,
@@ -77,11 +105,7 @@ export class LiveRelay {
       maxPayload: 8 * 1024 * 1024, perMessageDeflate: false, followRedirects: false,
     });
     this.log('live_connecting', { session: this.id, language: plan.module.id, mode: plan.mode, allowedSeconds });
-    this.upstream.on('open', () => this.sendUpstream({
-      type: 'session.start', event_id: `mural_start_${this.id}`,
-      session: { model: config.model, instructions: plan.instructions, audio: { output: { voice: config.voice } },
-                 delegation: { type: 'client' } },
-    }));
+    this.upstream.on('open', () => { this.upstreamOpen = true; this.startSession(); });
     this.upstream.on('message', (data, binary) => this.fromUpstream(data, binary));
     this.upstream.on('unexpected-response', (_request, response) => {
       this.log('live_upstream_rejected', { session: this.id, status: response.statusCode });
@@ -98,6 +122,16 @@ export class LiveRelay {
 
   private get module(): LanguageContent { return this.plan.module; }
 
+  /** Sends session.start once the provider is connected and, when continuing, the earlier text has arrived. */
+  private startSession(): void {
+    if (!this.upstreamOpen || this.state !== 'connecting' || (this.plan.continuing && !this.history)) return;
+    this.sendUpstream({
+      type: 'session.start', event_id: `mural_start_${this.id}`,
+      session: { model: this.config.model, instructions: this.plan.instructions, audio: { output: { voice: this.config.voice } },
+                 delegation: { type: 'client' }, ...(this.history?.length ? { input: this.history } : {}) },
+    });
+  }
+
   private fromUpstream(data: WebSocket.RawData, binary: boolean): void {
     if (binary || this.state === 'ended') return;
     const raw = data.toString();
@@ -106,7 +140,7 @@ export class LiveRelay {
     switch (event.type) {
       case 'session.started':
         if (this.state !== 'connecting') break;
-        this.state = 'active'; this.startedAt = Date.now(); this.lastAliveAt = Date.now();
+        this.state = 'active'; this.startedAt = Date.now(); this.lastAliveAt = Date.now(); this.quietSince = Date.now();
         this.sendUpstream({ type: 'session.instructions.append', event_id: `mural_greeting_${this.id}`, delegation_id: null,
                             content: this.plan.greeting });
         this.timers.push(setTimeout(() => this.requestClose('time_limit'), this.allowedSeconds * 1_000));
@@ -117,6 +151,7 @@ export class LiveRelay {
           const now = Date.now();
           if (now - this.lastAliveAt > this.config.idleAudioSeconds * 1_000) { this.requestClose('idle_audio'); return; }
           if (now - this.lastForwardedAt > SILENCE_AFTER_MS) this.sendUpstream({ type: 'session.input_audio.append', audio: SILENCE });
+          this.watchConversation(now);
         }, 100));
         this.sendClient({ type: 'mural.session', sessionID: this.id, allowedSeconds: this.allowedSeconds, language: this.module.id,
                           mode: this.plan.mode });
@@ -147,6 +182,8 @@ export class LiveRelay {
         const offset = this.outputSamples;
         this.outputSamples += pcm.length;
         if (isSilent(pcm)) { this.traffic.droppedSilence++; return; }
+        this.muralSpoke = true;
+        if (!this.checkedIn) this.quietSince = Date.now();
         this.sendClientBinary(outputFrame(offset, encodeMulaw(pcm)));
         return;
       }
@@ -169,6 +206,8 @@ export class LiveRelay {
       if (event.type === 'session.close') this.requestClose('ended_by_learner');
       if (event.type === 'mural.wrap_up') this.wrapUp(true);
       if (event.type === 'mural.typed') void this.typed((event as { text?: unknown }).text);
+      if (event.type === 'mural.help') this.help();
+      if (event.type === 'mural.history') this.receiveHistory((event as { messages?: unknown }).messages);
       return;
     }
     const bytes = data instanceof Buffer ? data : Buffer.concat(Array.isArray(data) ? data : [Buffer.from(data as ArrayBuffer)]);
@@ -179,7 +218,48 @@ export class LiveRelay {
     if (bytes[0] !== FRAME_AUDIO || bytes.length < 2 || bytes.length - 1 > MAX_AUDIO_SAMPLES) return;
     const pcm = decodeMulaw(bytes.subarray(1));
     this.lastAliveAt = this.lastForwardedAt = Date.now();
+    this.learnerEngaged();
     this.sendUpstream({ type: 'session.input_audio.append', audio: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
+  }
+
+  private learnerEngaged(): void { this.quietSince = Date.now(); this.checkedIn = false; }
+
+  /** The end of an earlier conversation, accepted once, before the session starts. */
+  private receiveHistory(messages: unknown): void {
+    if (!this.plan.continuing || this.history || this.state !== 'connecting') return;
+    const items = cleanHistory(messages);
+    if (!items) { this.finish('invalid_history'); return; }
+    this.history = items;
+    this.startSession();
+  }
+
+  /** The help button: Mural restates its last idea more simply. */
+  private help(): void {
+    const now = Date.now();
+    if (this.state !== 'active' || !this.plan.help || now - this.lastHelpAt < HELP_GAP_MS) return;
+    this.lastHelpAt = now; this.learnerEngaged();
+    this.sendUpstream({ type: 'session.instructions.append', event_id: `mural_help_${randomUUID()}`, delegation_id: null, content: this.plan.help });
+    this.log('live_help', { session: this.id });
+  }
+
+  /** Once a second-ish: one gentle check-in after a quiet spell, and a redirect when Mural's reply left the target language. */
+  private watchConversation(now: number): void {
+    if (this.plan.checkIn && this.config.checkInSeconds > 0 && !this.checkedIn && this.muralSpoke && !this.typing && !this.wrappedUp
+        && now - this.quietSince >= this.config.checkInSeconds * 1_000) {
+      this.checkedIn = true;
+      this.sendUpstream({ type: 'session.instructions.append', event_id: `mural_check_in_${randomUUID()}`, delegation_id: null, content: this.plan.checkIn });
+      this.log('live_check_in', { session: this.id });
+    }
+    const index = this.transcript.length - 1, last = this.transcript[index];
+    if (this.plan.redirect && last?.speaker === 'mural' && index > this.judgedLine && last.text.trim().length > MIN_CHECK_CHARS
+        && now - this.lastMuralDeltaAt >= REPLY_SETTLED_MS) {
+      this.judgedLine = index;
+      if (this.redirects < MAX_REDIRECTS && now - this.lastRedirectAt >= REDIRECT_GAP_MS && looksOffLanguage(this.module, last.text)) {
+        this.redirects++; this.lastRedirectAt = now;
+        this.sendUpstream({ type: 'session.instructions.append', event_id: `mural_redirect_${randomUUID()}`, delegation_id: null, content: this.plan.redirect });
+        this.log('live_redirect', { session: this.id });
+      }
+    }
   }
 
   /** Asks Mural to finish with its closing routine, then ends the call after a short goodbye. */
@@ -229,6 +309,7 @@ export class LiveRelay {
   private keepTranscript(speaker: TranscriptLine['speaker'], delta: unknown): void {
     if (typeof delta !== 'string' || this.transcriptChars + delta.length > MAX_TRANSCRIPT_CHARS) return;
     this.transcriptChars += delta.length;
+    if (speaker === 'mural') this.lastMuralDeltaAt = Date.now();
     const last = this.transcript.at(-1);
     if (last?.speaker === speaker && !last.typed) last.text += delta;
     else this.transcript.push({ speaker, text: delta });

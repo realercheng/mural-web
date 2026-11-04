@@ -8,7 +8,8 @@ import { LiveRelay } from './live.js';
 import { kidScenario, publicKidScenarios, publicLevels } from './kids.js';
 import { assessmentInput, assessmentInstructions, assessmentSchema, parseAssessmentReply, parseAssessmentRequest } from './assessment.js';
 import { cleanText, HelperLimited, TextHelpers } from './helpers.js';
-import { language, livePlan, lookupInstructions, publicLanguages, translationInstructions } from './policy.js';
+import { language, livePlan, lookupInstructions, publicLanguages, publicThemes, translationInstructions } from './policy.js';
+import { Topics, TopicLimited } from './topic.js';
 import { PendingReports, writeReport } from './report.js';
 import { UsageStore } from './usage.js';
 
@@ -31,6 +32,7 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
   const pending = new PendingReports();
   const reporting = new Set<string>();
   const helpers = config.text ? new TextHelpers(config.text, config.helperLimits, config.timeZone) : undefined;
+  const topics = config.text && config.topicDailyLimit > 0 ? new Topics(config.text, config.topicDailyLimit, config.timeZone) : undefined;
   const secure = config.publicOrigins.every(origin => origin.startsWith('https:'));
   const wsOrigins = config.publicOrigins.map(origin => origin.replace(/^http/, 'ws')).join(' ');
   const csp = `default-src 'self'; connect-src 'self' ${wsOrigins}; img-src 'self' data:; style-src 'self'; script-src 'self'; ` +
@@ -108,7 +110,34 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
         if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
         send(response, 200, { usage: usage.summary(limits), active: Boolean(active), languages: publicLanguages(),
                               kids: { scenarios: publicKidScenarios(), levels: publicLevels(), reports: Boolean(config.text) },
-                              helpers: helpers ? { remainingToday: helpers.remainingToday() } : null });
+                              helpers: helpers ? { remainingToday: helpers.remainingToday() } : null,
+                              topics: topics ? { remainingToday: topics.remainingToday() } : null });
+        return;
+      }
+      if (path === '/api/themes' && request.method === 'GET') {
+        if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
+        const module = language(new URL(request.url ?? '/', 'http://local').searchParams.get('language') ?? '');
+        if (!module) { fail(response, 400, 'invalid_language'); return; }
+        send(response, 200, { themes: publicThemes(module) });
+        return;
+      }
+      if (path === '/api/topic' && request.method === 'POST') {
+        if (!sameOrigin(request)) { fail(response, 403, 'origin_rejected'); return; }
+        if (!auth.authenticated(request)) { fail(response, 401, 'sign_in_required'); return; }
+        if (!topics) { fail(response, 503, 'topics_unavailable'); return; }
+        const body = await readJSON(request, 2_048) as { language?: unknown; topic?: unknown };
+        const module = language(typeof body?.language === 'string' ? body.language : '');
+        if (!module) { fail(response, 400, 'invalid_language'); return; }
+        try {
+          const found = await topics.search(module, body?.topic);
+          log('topic_found', { language: module.id });
+          send(response, 200, { id: found.id, topic: found.topic, notes: found.notes, remainingToday: topics.remainingToday() });
+        } catch (error) {
+          if (error instanceof TopicLimited) { fail(response, 429, 'topic_limited'); return; }
+          if (error instanceof Error && error.message === 'invalid_topic') { fail(response, 400, 'invalid_topic'); return; }
+          log('topic_failed', { category: error instanceof Error ? error.message.slice(0, 40) : 'unknown' });
+          fail(response, 502, 'topic_failed');
+        }
         return;
       }
       if ((path === '/api/meaning' || path === '/api/lookup') && request.method === 'POST') {
@@ -200,7 +229,7 @@ export function createApp(config: Config, log: Log = jsonLog): { server: Server;
     if (url.pathname !== '/api/live') return reject(404, 'not_found');
     if (!sameOrigin(request)) return reject(403, 'origin_rejected');
     if (!auth.authenticated(request)) return reject(401, 'sign_in_required');
-    const chosen = livePlan(url.searchParams);
+    const chosen = livePlan(url.searchParams, topics);
     if ('error' in chosen) return reject(400, chosen.error);
     if (active) return reject(409, 'session_active');
     // The page may ask for less time, e.g. a child's remaining daily minutes set by a parent.

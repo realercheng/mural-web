@@ -32,7 +32,7 @@ header { text-align: center; }
 .primary { background: var(--orange); color: white; font-weight: 600; }
 .secondary { background: var(--peach); color: var(--ink); }
 .update { background: var(--ink); color: var(--cream); width: 100%; }
-.languages { display: flex; gap: 0.5rem; }
+.languages { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .chip { background: white; color: var(--ink); border: 1px solid var(--peach); }
 .chip.selected { background: var(--ink); color: var(--cream); }
 .orb {
@@ -119,3 +119,9 @@ header { text-align: center; }
   padding: 1.5rem; border-radius: 1.5rem; border: 1px solid var(--peach); background: white; color: var(--ink); text-align: center;
 }
 .big-word { font-size: 2rem; }
+
+.themes { border: 1px solid var(--peach); border-radius: 12px; padding: 0.6rem 0.8rem; background: white; }
+.themes summary { cursor: pointer; font-weight: 600; }
+.themes fieldset { border: none; padding: 0; margin: 0.7rem 0 0; }
+.themes legend { color: var(--secondary); font-size: 0.85rem; padding: 0; margin-bottom: 0.3rem; }
+.notes { margin-top: 0.5rem; padding: 0.5rem 0.7rem; background: var(--cream); border-radius: 10px; white-space: pre-wrap; }

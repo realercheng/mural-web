@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sys
 import tempfile
@@ -182,6 +183,32 @@ class ExportAndroidContentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             core = write_core(pathlib.Path(tmp), ['Norwegian', 'Spanish'])
             self.assertEqual(eac.generate(core), eac.generate(core))
+
+
+class WebContentPackageTests(unittest.TestCase):
+    ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+    def test_package_matches_swift_and_covers_every_language(self):
+        core = self.ROOT / 'apps/ios/Core'
+        text = eac.generate_web(core)
+        self.assertEqual(text, (self.ROOT / eac.WEB_DEST).read_text())
+        pack = json.loads(text)
+        self.assertEqual(pack['version'], 1)
+        self.assertEqual(len(pack['themes']), 24)
+        self.assertEqual([l['id'] for l in pack['languages']], ['nb', 'es', 'en', 'fr', 'de', 'it', 'pt', 'zh', 'sr', 'el', 'tl', 'nl', 'ru'])
+        # Only the languages Swift has no text for are supplemented, and they are marked for native review.
+        self.assertEqual({l['id']: l['pendingNativeReview'] for l in pack['languages'] if l['pendingNativeReview']},
+                         {'nl': ['introduction', 'conversationGuidance'], 'ru': ['introduction', 'conversationGuidance']})
+        for language in pack['languages']:
+            self.assertEqual(len(language['teachingFocus']), 6)
+            self.assertEqual(len(language['conversationGuidance'].split('\n')), 3, language['id'])
+
+    def test_swift_text_wins_over_a_supplement(self):
+        core = self.ROOT / 'apps/ios/Core'
+        openings, rules = eac.policy_texts(core)
+        self.assertNotIn('nl', openings)
+        self.assertNotIn('ru', rules)
+        self.assertIn('en', openings)
 
 
 if __name__ == '__main__':
